@@ -658,9 +658,10 @@ def probe_input_video(src: str) -> dict:
 
 
 class Worker(threading.Thread):
-    def __init__(self, url: str, opts: dict, output_queue: queue.Queue):
+    def __init__(self, urls: list[str], opts: dict, output_queue: queue.Queue):
         super().__init__(daemon=True)
-        self.url = url
+        self.urls = urls
+        self.url = urls[0] if urls else ""
         self.opts = opts
         self.q = output_queue
         self.proc: Optional[subprocess.Popen] = None
@@ -1209,66 +1210,83 @@ class Worker(threading.Thread):
         if removed:
             self.q.put(("log", f"Removed intermediate files: {', '.join(removed)}"))
 
+    def _run_single_url(self, url: str, index: int, total: int) -> tuple[bool, str]:
+        self.url = url
+        self.downloaded_files = []
+        out_folder = self.opts.get("outdir", os.path.expanduser("~/Downloads"))
+
+        self.q.put(("log", f"=== Link {index}/{total}: {url} ==="))
+        mode = self.opts["mode"]
+        outtmpl, out_folder = self._build_outtmpl(out_folder, mode)
+        self.q.put(("log", f"Output template: {outtmpl}"))
+
+        before_download = snapshot_temp_files(out_folder)
+        success = self._run_yt_dlp_subprocess(outtmpl, mode)
+        if not success:
+            self.q.put(("error", f"Link {index}/{total} failed; conversion was not started."))
+            return False, out_folder
+
+        candidates = unique_existing_paths(self.downloaded_files)
+        snapshot_candidates = self._find_changed_intermediate_files(
+            out_folder, before_download
+        )
+        candidates = unique_existing_paths([*candidates, *snapshot_candidates])
+        candidates.sort(key=lambda path: os.path.getmtime(path))
+
+        if not candidates:
+            self.q.put(("error", f"Link {index}/{total}: no newly downloaded intermediate file was found."))
+            return False, out_folder
+
+        successful_outputs: list[str] = []
+        successful_pairs: list[tuple[str, str]] = []
+        for src in candidates:
+            final = build_final_path(src, self.opts["container"])
+            self.q.put(("log", f"Converting: {src} -> {final}"))
+
+            converted = self._ffmpeg_convert(
+                src=src,
+                dst=final,
+                mode=mode,
+                video_codec=self.opts.get("video_codec"),
+                audio_codec=self.opts.get("audio_codec"),
+            )
+            if converted:
+                successful_outputs.append(final)
+                successful_pairs.append((src, final))
+            else:
+                self.q.put(("error", f"Conversion failed for {src}"))
+
+        if not successful_outputs:
+            self.q.put(("error", f"Link {index}/{total}: no output files were created successfully."))
+            return False, out_folder
+
+        for src, final in successful_pairs:
+            if os.path.isfile(final):
+                self._cleanup_after_success(src, final)
+
+        self.q.put(("log", f"Link {index}/{total}: created {len(successful_outputs)} output file(s)."))
+        return True, out_folder
+
     def run(self) -> None:
         out_folder = self.opts.get("outdir", os.path.expanduser("~/Downloads"))
         try:
             self._log_capabilities()
+            total = len(self.urls)
+            successful_links = 0
 
-            mode = self.opts["mode"]
-            outtmpl, out_folder = self._build_outtmpl(out_folder, mode)
-            self.q.put(("log", f"Output template: {outtmpl}"))
+            for index, url in enumerate(self.urls, start=1):
+                try:
+                    success, out_folder = self._run_single_url(url, index, total)
+                    if success:
+                        successful_links += 1
+                except Exception as exc:
+                    self.q.put(("error", f"Link {index}/{total} failed with an exception: {exc}"))
 
-            before_download = snapshot_temp_files(out_folder)
-            success = self._run_yt_dlp_subprocess(outtmpl, mode)
-
-            if not success:
-                self.q.put(("error", "Download failed; conversion was not started."))
-                return
-
-            # Prefer paths explicitly reported by yt-dlp. Only use a
-            # before/after snapshot when the API did not expose final paths.
-            candidates = unique_existing_paths(self.downloaded_files)
-            snapshot_candidates = self._find_changed_intermediate_files(
-                out_folder, before_download
-            )
-            candidates = unique_existing_paths([*candidates, *snapshot_candidates])
-            candidates.sort(key=lambda path: os.path.getmtime(path))
-
-            if not candidates:
-                self.q.put(("error", "No newly downloaded intermediate file was found."))
-                return
-
-            successful_outputs: list[str] = []
-            successful_pairs: list[tuple[str, str]] = []
-            for src in candidates:
-                final = build_final_path(src, self.opts["container"])
-                self.q.put(("log", f"Converting: {src} -> {final}"))
-
-                converted = self._ffmpeg_convert(
-                    src=src,
-                    dst=final,
-                    mode=mode,
-                    video_codec=self.opts.get("video_codec"),
-                    audio_codec=self.opts.get("audio_codec"),
-                )
-                if converted:
-                    successful_outputs.append(final)
-                    successful_pairs.append((src, final))
-                else:
-                    self.q.put(("error", f"Conversion failed for {src}"))
-
-            if not successful_outputs:
-                self.q.put(("error", "No output files were created successfully."))
-                return
-
-            # Cleanup only after every candidate has been processed. This
-            # prevents one successful output from deleting another candidate
-            # still waiting in the loop.
-            for src, final in successful_pairs:
-                if os.path.isfile(final):
-                    self._cleanup_after_success(src, final)
-
-            self.q.put(("log", f"Created {len(successful_outputs)} output file(s)."))
+            failed_links = total - successful_links
+            self.q.put((
+                "log",
+                f"Batch complete: {successful_links} succeeded, {failed_links} failed, {total} total.",
+            ))
         except Exception as exc:
             self.q.put(("error", f"Worker exception: {exc}"))
         finally:
@@ -1294,7 +1312,7 @@ class App:
 
         top = ttk.Frame(root, padding=8)
         top.pack(fill="x")
-        ttk.Label(top, text="URL:").pack(side="left")
+        ttk.Label(top, text="URL(s):").pack(side="left")
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(top, textvariable=self.url_var, width=80)
         self.url_entry.pack(side="left", padx=6, fill="x", expand=True)
@@ -1750,19 +1768,29 @@ class App:
             messagebox.showinfo("Already running", "A download is already running.")
             return
 
-        url = self.url_var.get().strip()
-        if not url:
-            messagebox.showwarning("No URL", "Enter a URL.")
+        raw_urls = self.url_var.get().strip()
+        urls = [item.strip() for item in raw_urls.split(";") if item.strip()]
+        if not urls:
+            messagebox.showwarning("No URL", "Enter at least one URL.")
             return
 
-        if not (
-            url.startswith("http://")
-            or url.startswith("https://")
-            or url.startswith("ytsearch:")
-        ):
+        unusual_urls = [
+            url
+            for url in urls
+            if not (
+                url.startswith("http://")
+                or url.startswith("https://")
+                or url.startswith("ytsearch:")
+            )
+        ]
+        if unusual_urls:
+            preview = "\n".join(unusual_urls[:5])
+            if len(unusual_urls) > 5:
+                preview += f"\n...and {len(unusual_urls) - 5} more"
             proceed = messagebox.askyesno(
-                "Validate URL",
-                "The URL does not look like HTTP(S). Proceed anyway?",
+                "Validate URLs",
+                "Some entries do not look like HTTP(S) URLs:\n\n"
+                f"{preview}\n\nProceed anyway?",
             )
             if not proceed:
                 return
@@ -1811,9 +1839,9 @@ class App:
 
         self.status_var.set("Running")
         self.start_btn.configure(state="disabled")
-        self.worker = Worker(url, options, self.q)
+        self.worker = Worker(urls, options, self.q)
         self.worker.start()
-        self.log("Worker started.")
+        self.log(f"Worker started with {len(urls)} link(s).")
 
     def _process_queue(self) -> None:
         try:
