@@ -23,7 +23,7 @@ from typing import Iterable, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
-APP_VERSION = "2026.10.30.1"
+APP_VERSION = "2026.11.15.3"
 FFMPEG_BUILD_PROFILE = "all-vendors-win-linux-v5-required-codecs"
 WINDOWS_FFMPEG_BUILD_TOOLCHAIN: Optional[str] = None
 AMD_PCI_VENDOR_ID = "0x1002"
@@ -786,18 +786,111 @@ def _windows_ffmpeg_toolchain_preference() -> str:
     requested = os.environ.get("DOWNLOADER_FFMPEG_TOOLCHAIN", "auto").strip().lower()
     return requested if requested in {"auto", "msvc", "msys2"} else "invalid"
 
-def _find_windows_msvc_environment(log=None) -> Optional[dict[str, str]]:
-    """Return a fully initialized x64 MSVC environment, loading vcvars if needed."""
-    env = os.environ.copy()
-    existing_tools = all(
-        shutil.which(name, path=env.get("PATH"))
+def _windows_msvc_x64_bin_dirs(env: dict[str, str], installations: Iterable[str] = ()) -> list[str]:
+    """Find x64 MSVC compiler directories without relying on the process PATH."""
+    candidates: list[str] = []
+
+    def add_tool_root(root: str) -> None:
+        if not root:
+            return
+        root = os.path.abspath(os.path.expandvars(root.strip().strip('"')))
+        # VCToolsInstallDir points directly at the versioned MSVC directory.
+        for host in ("Hostx64", "Hostx86"):
+            candidates.append(os.path.join(root, "bin", host, "x64"))
+        # VSINSTALLDIR / installationPath point at the VS instance root.
+        vc_tools = os.path.join(root, "VC", "Tools", "MSVC")
+        if os.path.isdir(vc_tools):
+            try:
+                versions = sorted(
+                    (entry.path for entry in os.scandir(vc_tools) if entry.is_dir()),
+                    reverse=True,
+                )
+            except OSError:
+                versions = []
+            for version_dir in versions:
+                for host in ("Hostx64", "Hostx86"):
+                    candidates.append(os.path.join(version_dir, "bin", host, "x64"))
+        # VCINSTALLDIR points at the VC directory itself.
+        if os.path.basename(os.path.normpath(root)).casefold() == "vc":
+            tools_root = os.path.join(root, "Tools", "MSVC")
+            if os.path.isdir(tools_root):
+                try:
+                    versions = sorted(
+                        (entry.path for entry in os.scandir(tools_root) if entry.is_dir()),
+                        reverse=True,
+                    )
+                except OSError:
+                    versions = []
+                for version_dir in versions:
+                    for host in ("Hostx64", "Hostx86"):
+                        candidates.append(os.path.join(version_dir, "bin", host, "x64"))
+
+    add_tool_root(env.get("VCToolsInstallDir", ""))
+    add_tool_root(env.get("VSINSTALLDIR", ""))
+    add_tool_root(env.get("VCINSTALLDIR", ""))
+    for installation in installations:
+        add_tool_root(installation)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if all(os.path.isfile(os.path.join(candidate, name)) for name in ("cl.exe", "link.exe", "nmake.exe")):
+            result.append(os.path.abspath(candidate))
+    return result
+
+
+def _windows_env_from_dump(output: str, base: dict[str, str], marker: str) -> Optional[dict[str, str]]:
+    """Parse an environment dump emitted after a VS shell has initialized."""
+    lines = output.splitlines()
+    try:
+        marker_index = lines.index(marker)
+    except ValueError:
+        return None
+    loaded = base.copy()
+    for line in lines[marker_index + 1:]:
+        key, separator, value = line.partition("=")
+        # cmd.exe's set output can include pseudo variables such as =C:; skip those.
+        if separator and key and not key.startswith("="):
+            loaded[key] = value
+    return loaded
+
+
+def _windows_msvc_tools_ready(env: dict[str, str]) -> bool:
+    return all(
+        shutil.which(name, path=env.get("PATH", ""))
         for name in ("cl.exe", "link.exe", "nmake.exe")
     )
+
+
+def _find_windows_msvc_environment(log=None) -> Optional[dict[str, str]]:
+    """Return an x64 MSVC environment, using Developer PowerShell when needed.
+
+    The Visual Studio compiler is not required to be in the user's/global PATH.
+    Its environment is initialized in a child process and returned to this
+    process as a private build environment.
+    """
+    env = os.environ.copy()
     target_arch = env.get("VSCMD_ARG_TGT_ARCH", "").strip().lower()
-    compiler_path = shutil.which("cl.exe", path=env.get("PATH")) or ""
+    compiler_path = shutil.which("cl.exe", path=env.get("PATH", "")) or ""
     compiler_is_x64 = bool(re.search(r"(?i)\\Host(?:x64|x86)\\x64\\", compiler_path))
-    if existing_tools and (target_arch in {"x64", "amd64"} or compiler_is_x64):
-        return env
+
+    # A Developer PowerShell session normally sets these variables. Recover the
+    # compiler directory from VCToolsInstallDir even when PATH was customized.
+    existing_tool_dirs = _windows_msvc_x64_bin_dirs(env)
+    if existing_tool_dirs:
+        env["PATH"] = os.pathsep.join(existing_tool_dirs + [env.get("PATH", "")])
+    if _windows_msvc_tools_ready(env):
+        target_arch = env.get("VSCMD_ARG_TGT_ARCH", "").strip().lower()
+        compiler_path = shutil.which("cl.exe", path=env.get("PATH", "")) or ""
+        compiler_is_x64 = bool(re.search(r"(?i)\\Host(?:x64|x86)\\x64\\", compiler_path))
+        if target_arch in {"x64", "amd64"} or compiler_is_x64:
+            if log:
+                log("Using the active Visual Studio Developer PowerShell x64 environment.")
+            return env
 
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     vswhere_candidates = [
@@ -805,80 +898,144 @@ def _find_windows_msvc_environment(log=None) -> Optional[dict[str, str]]:
     ]
     vswhere = next((item for item in vswhere_candidates if os.path.isfile(item)), None)
     installations: list[str] = []
+
+    # Prefer the Visual Studio instance already associated with this process,
+    # then ask vswhere for every instance containing the C++ toolset.
+    for key in ("VSINSTALLDIR",):
+        value = env.get(key)
+        if value:
+            installations.append(value)
+    vc_install = env.get("VCINSTALLDIR")
+    if vc_install:
+        installations.append(os.path.dirname(os.path.normpath(vc_install)))
+
     if vswhere:
         try:
             result = subprocess.run(
-                [vswhere, "-latest", "-products", "*", "-requires",
+                [vswhere, "-all", "-products", "*", "-requires",
                  "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=15, check=False,
             )
             if result.returncode == 0:
                 installations.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
-        except Exception:
-            pass
+        except Exception as exc:
+            if log:
+                log(f"WARNING: vswhere could not enumerate Visual Studio installations: {exc}")
 
-    for key in ("VSINSTALLDIR",):
-        value = os.environ.get(key)
-        if value:
-            installations.append(value)
-    vc_install = os.environ.get("VCINSTALLDIR")
-    if vc_install:
-        installations.append(os.path.dirname(os.path.normpath(vc_install)))
-
-    for year in ("2022", "2019"):
+    for year in ("2026", "2022", "2019"):
         for edition in ("BuildTools", "Community", "Professional", "Enterprise"):
             installations.append(os.path.join(
                 os.environ.get("ProgramFiles", r"C:\Program Files"),
                 "Microsoft Visual Studio", year, edition,
             ))
 
-    seen: set[str] = set()
-    vcvars_candidates: list[str] = []
+    # De-duplicate while preserving the best-first order.
+    unique_installations: list[str] = []
+    seen_installations: set[str] = set()
     for installation in installations:
         normalized = os.path.normcase(os.path.abspath(installation))
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        if os.path.basename(normalized).lower() == "vc":
-            candidate = os.path.join(installation, "Auxiliary", "Build", "vcvars64.bat")
-        else:
-            candidate = os.path.join(installation, "VC", "Auxiliary", "Build", "vcvars64.bat")
-        if os.path.isfile(candidate):
-            vcvars_candidates.append(candidate)
+        if normalized not in seen_installations:
+            seen_installations.add(normalized)
+            unique_installations.append(os.path.abspath(installation))
 
-    if not vcvars_candidates:
+    if not unique_installations:
+        if log:
+            log("ERROR: No Visual Studio installation with the MSVC C++ toolset was found by vswhere.")
         return None
 
-    cmd_exe = shutil.which("cmd.exe", path=env.get("PATH")) or os.path.join(
+    cmd_exe = shutil.which("cmd.exe", path=env.get("PATH", "")) or os.path.join(
         os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"
     )
-    for vcvars in vcvars_candidates:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = shutil.which("powershell.exe", path=env.get("PATH", "")) or os.path.join(
+        system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+    )
+
+    for installation in unique_installations:
+        launch_dev_shell = os.path.join(installation, "Common7", "Tools", "Launch-VsDevShell.ps1")
+        vsdevcmd = os.path.join(installation, "Common7", "Tools", "VsDevCmd.bat")
+        vcvars64 = os.path.join(installation, "VC", "Auxiliary", "Build", "vcvars64.bat")
+
+        # First use the same PowerShell entry point as the "Developer PowerShell
+        # for Visual Studio" shortcut. This does not change the system/user PATH.
+        if os.path.isfile(launch_dev_shell) and os.path.isfile(powershell):
+            marker = "__DOWNLOADER_VSDEV_ENV_BEGIN__"
+            script = (
+                "$ErrorActionPreference = 'Stop'; "
+                f"& '{launch_dev_shell.replace(chr(39), chr(39) + chr(39))}' "
+                "-Arch amd64 -HostArch amd64 -SkipAutomaticLocation; "
+                f"[Console]::Out.WriteLine('{marker}'); "
+                "Get-ChildItem Env: | ForEach-Object { "
+                "[Console]::Out.WriteLine(('{0}={1}' -f $_.Name, $_.Value)) }"
+            )
+            encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                     "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_script],
+                    env=env, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=90, check=False,
+                )
+                if result.returncode == 0:
+                    loaded = _windows_env_from_dump(result.stdout, env, marker)
+                    if loaded:
+                        tool_dirs = _windows_msvc_x64_bin_dirs(loaded, (installation,))
+                        if tool_dirs:
+                            loaded["PATH"] = os.pathsep.join(tool_dirs + [loaded.get("PATH", "")])
+                        if _windows_msvc_tools_ready(loaded):
+                            if log:
+                                log(f"Initialized Visual Studio Developer PowerShell x64 from: {launch_dev_shell}")
+                            return loaded
+                elif log:
+                    detail = (result.stderr or result.stdout or "").strip().splitlines()
+                    if detail:
+                        log(f"WARNING: Developer PowerShell initialization failed: {detail[-1]}")
+            except Exception as exc:
+                if log:
+                    log(f"WARNING: Could not launch Visual Studio Developer PowerShell: {exc}")
+
+        # VsDevCmd is the command-line backend used by Visual Studio's developer
+        # shells; vcvars64 is retained as a compatibility fallback.
+        setup_script = vsdevcmd if os.path.isfile(vsdevcmd) else vcvars64
+        if not os.path.isfile(setup_script):
+            continue
+
         batch_path = None
+        marker = "__DOWNLOADER_VSDEV_ENV_BEGIN__"
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".bat", prefix="downloader-vcvars-",
+                mode="w", suffix=".bat", prefix="downloader-vsdev-",
                 encoding="utf-8", newline="\r\n", delete=False,
             ) as batch:
                 batch_path = batch.name
-                batch.write(f'@echo off\r\ncall "{vcvars}" >nul\r\n')
+                if setup_script.lower().endswith("vsdevcmd.bat"):
+                    batch.write(f'@echo off\r\ncall "{setup_script}" -no_logo -arch=amd64 -host_arch=amd64 >nul\r\n')
+                else:
+                    batch.write(f'@echo off\r\ncall "{setup_script}" >nul\r\n')
                 batch.write('if errorlevel 1 exit /b %errorlevel%\r\n')
+                batch.write(f'echo {marker}\r\n')
                 batch.write("set\r\n")
             result = subprocess.run(
                 [cmd_exe, "/d", "/c", batch_path], env=env,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=60, check=False,
+                timeout=90, check=False,
             )
             if result.returncode != 0:
-                continue
-            loaded = env.copy()
-            for line in result.stdout.splitlines():
-                key, separator, value = line.partition("=")
-                if separator and key and not key.startswith("="):
-                    loaded[key] = value
-            if all(shutil.which(name, path=loaded.get("PATH")) for name in ("cl.exe", "link.exe", "nmake.exe")):
                 if log:
-                    log(f"Loaded Visual Studio x64 build environment from: {vcvars}")
+                    detail = (result.stderr or result.stdout or "").strip().splitlines()
+                    if detail:
+                        log(f"WARNING: Visual Studio command-line environment initialization failed: {detail[-1]}")
+                continue
+            loaded = _windows_env_from_dump(result.stdout, env, marker)
+            if not loaded:
+                continue
+            tool_dirs = _windows_msvc_x64_bin_dirs(loaded, (installation,))
+            if tool_dirs:
+                loaded["PATH"] = os.pathsep.join(tool_dirs + [loaded.get("PATH", "")])
+            if _windows_msvc_tools_ready(loaded):
+                if log:
+                    log(f"Initialized Visual Studio x64 build environment from: {setup_script}")
                 return loaded
         except Exception as exc:
             if log:
@@ -889,10 +1046,48 @@ def _find_windows_msvc_environment(log=None) -> Optional[dict[str, str]]:
                     os.remove(batch_path)
                 except OSError:
                     pass
+
+    if log:
+        log(
+            "ERROR: Visual Studio was found, but its x64 Developer PowerShell environment "
+            "did not expose cl.exe, link.exe, and nmake.exe. Verify the Desktop development "
+            "with C++ workload and the x64/x86 build tools are installed."
+        )
     return None
 
+def _windows_msys2_roots(env: Optional[dict[str, str]] = None) -> list[str]:
+    """Return likely MSYS2 roots, including roots inferred from an active Bash path."""
+    environment = env or os.environ
+    roots: list[str] = []
+    for value in (
+        environment.get("MSYS2_ROOT"),
+        environment.get("MSYS_ROOT"),
+        r"C:\msys64",
+        r"C:\tools\msys64",
+        r"C:\msys32",
+    ):
+        if value:
+            normalized = os.path.abspath(os.path.expandvars(value.strip().strip('"')))
+            if normalized not in roots:
+                roots.append(normalized)
+
+    for path_value in (environment.get("PATH", ""), os.environ.get("PATH", "")):
+        for directory in path_value.split(os.pathsep):
+            if not directory:
+                continue
+            candidate = os.path.join(directory.strip('"'), "bash.exe")
+            if not os.path.isfile(candidate):
+                continue
+            normalized = os.path.normpath(candidate)
+            if re.search(r"(?i)\\usr\\bin\\bash\.exe$", normalized):
+                root = os.path.dirname(os.path.dirname(os.path.dirname(normalized)))
+                if root not in roots:
+                    roots.insert(0, root)
+    return roots
+
+
 def _find_windows_non_msys_bash() -> tuple[Optional[str], Optional[str]]:
-    """Find Git Bash (or Cygwin Bash), deliberately excluding MSYS2."""
+    """Find Git Bash or Cygwin Bash, excluding MSYS2."""
     roots: list[str] = []
     for value in (
         os.environ.get("GIT_FOR_WINDOWS_HOME"),
@@ -905,11 +1100,15 @@ def _find_windows_non_msys_bash() -> tuple[Optional[str], Optional[str]]:
             roots.append(value)
     bash_candidates: list[tuple[str, str]] = []
     for root in roots:
-        for relative in (os.path.join("bin", "bash.exe"), os.path.join("usr", "bin", "bash.exe"),
-                         os.path.join("bin", "bash")):
+        for relative in (
+            os.path.join("bin", "bash.exe"),
+            os.path.join("usr", "bin", "bash.exe"),
+            os.path.join("bin", "bash"),
+        ):
             candidate = os.path.join(root, relative)
             if os.path.isfile(candidate):
-                bash_candidates.append((os.path.abspath(candidate), os.path.abspath(os.path.join(root, "usr", "bin"))))
+                usr_bin = os.path.join(root, "usr", "bin")
+                bash_candidates.append((os.path.abspath(candidate), os.path.abspath(usr_bin)))
     path_bash = shutil.which("bash.exe") or shutil.which("bash")
     if path_bash and not re.search(r"(?i)\\msys(?:32|64|2)?\\", os.path.normpath(path_bash)):
         normalized_bash = os.path.normpath(path_bash)
@@ -921,65 +1120,185 @@ def _find_windows_non_msys_bash() -> tuple[Optional[str], Optional[str]]:
             usr_bin = os.path.join(root, "usr", "bin")
         bash_candidates.append((os.path.abspath(path_bash), os.path.abspath(usr_bin)))
     for bash, usr_bin in bash_candidates:
-        if re.search(r"(?i)\\msys(?:32|64|2)?\\", bash):
-            continue
-        return bash, usr_bin
+        if not re.search(r"(?i)\\msys(?:32|64|2)?\\", os.path.normpath(bash)):
+            return bash, usr_bin
     return None, None
 
-def _find_windows_gnu_make(env: dict[str, str], git_usr_bin: Optional[str]) -> Optional[str]:
+
+def _find_windows_bash_for_msvc(env: dict[str, str]) -> tuple[Optional[str], Optional[str], bool]:
+    """Find Bash for FFmpeg configure; MSYS2 Bash is valid with an MSVC compiler."""
+    # Prefer a complete MSYS2 shell-utility pair when its GNU Make is present.
+    for root in _windows_msys2_roots(env):
+        usr_bin = os.path.join(root, "usr", "bin")
+        bash = os.path.join(usr_bin, "bash.exe")
+        make = os.path.join(usr_bin, "make.exe")
+        if os.path.isfile(bash) and os.path.isfile(make):
+            return os.path.abspath(bash), os.path.abspath(usr_bin), True
+
+    # Prefer an MSYS2 base shell over Git Bash when it exists, even if make
+    # needs installing. This keeps the shell and its POSIX utility runtime paired.
+    for root in _windows_msys2_roots(env):
+        usr_bin = os.path.join(root, "usr", "bin")
+        bash = os.path.join(usr_bin, "bash.exe")
+        if os.path.isfile(bash):
+            return os.path.abspath(bash), os.path.abspath(usr_bin), True
+
+    # Git for Windows and Cygwin are also suitable shells when GNU Make is
+    # available in their utility directory or elsewhere on the build PATH.
+    bash, usr_bin = _find_windows_non_msys_bash()
+    if bash:
+        return bash, usr_bin, False
+
+    path_bash = shutil.which("bash.exe", path=env.get("PATH", "")) or shutil.which(
+        "bash", path=env.get("PATH", "")
+    )
+    if path_bash:
+        normalized = os.path.normpath(path_bash)
+        if re.search(r"(?i)\\usr\\bin\\bash(?:\.exe)?$", normalized):
+            usr_bin = os.path.dirname(normalized)
+        else:
+            usr_bin = os.path.join(os.path.dirname(os.path.dirname(normalized)), "usr", "bin")
+        is_msys = bool(re.search(r"(?i)\\msys(?:32|64|2)?\\", normalized))
+        return os.path.abspath(path_bash), os.path.abspath(usr_bin), is_msys
+    return None, None, False
+
+
+def _is_gnu_make_executable(candidate: str, env: dict[str, str]) -> bool:
+    """Reject NMAKE and unrelated executables accidentally named make.exe."""
+    try:
+        result = subprocess.run(
+            [candidate, "--version"], env=env, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=10, check=False,
+        )
+    except Exception:
+        return False
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    return result.returncode == 0 and "GNU Make" in output
+
+
+def _find_windows_gnu_make(env: dict[str, str], shell_usr_bin: Optional[str]) -> Optional[str]:
     candidates: list[str] = []
-    explicit = os.environ.get("DOWNLOADER_GNU_MAKE")
+    explicit = os.environ.get("DOWNLOADER_GNU_MAKE") or env.get("DOWNLOADER_GNU_MAKE")
     if explicit:
-        candidates.append(explicit)
-    if git_usr_bin:
-        candidates.append(os.path.join(git_usr_bin, "make.exe"))
-    path = env.get("PATH", "")
+        explicit = os.path.expandvars(explicit.strip().strip('"'))
+        explicit_path = shutil.which(explicit, path=env.get("PATH", "")) if not os.path.isabs(explicit) else explicit
+        candidates.append(explicit_path or explicit)
+    if shell_usr_bin:
+        candidates.extend((
+            os.path.join(shell_usr_bin, "make.exe"),
+            os.path.join(shell_usr_bin, "make"),
+        ))
+    for root in _windows_msys2_roots(env):
+        candidates.append(os.path.join(root, "usr", "bin", "make.exe"))
     for name in ("make.exe", "make"):
-        found = shutil.which(name, path=path)
+        found = shutil.which(name, path=env.get("PATH", ""))
         if found:
             candidates.append(found)
+
     seen: set[str] = set()
     for candidate in candidates:
         if not candidate:
             continue
-        normalized = os.path.normcase(os.path.abspath(candidate))
+        candidate = os.path.abspath(os.path.expandvars(candidate.strip().strip('"')))
+        normalized = os.path.normcase(candidate)
         if normalized in seen:
             continue
         seen.add(normalized)
-        if not os.path.isfile(candidate):
-            continue
-        # The MSVC route must not silently depend on make installed under MSYS2.
-        if re.search(r"(?i)\\msys(?:32|64|2)?\\", os.path.normpath(candidate)):
-            continue
-        return os.path.abspath(candidate)
+        if os.path.isfile(candidate) and _is_gnu_make_executable(candidate, env):
+            return candidate
     return None
+
+
+def _install_msys2_gnu_make_if_available(
+    bash: str, shell_usr_bin: Optional[str], env: dict[str, str], log,
+) -> bool:
+    """Install MSYS2's GNU Make package when an MSYS2 shell exists but make does not."""
+    if not shell_usr_bin:
+        return False
+    # Requiring pacman.exe is a stronger and custom-layout-safe MSYS2 check
+    # than relying on the installation directory's name.
+    pacman = os.path.join(shell_usr_bin, "pacman.exe")
+    if not os.path.isfile(pacman):
+        return False
+
+    msys_env = env.copy()
+    msys_env["MSYSTEM"] = "MSYS"
+    msys_env["MSYS2_PATH_TYPE"] = "inherit"
+    msys_env["CHERE_INVOKING"] = "1"
+    msys_env["PATH"] = os.pathsep.join((shell_usr_bin, msys_env.get("PATH", "")))
+    log("GNU Make is missing from the detected MSYS2 installation; installing its 'make' package...")
+    code = _run_streamed_process(
+        [bash, "-lc", "pacman -S --needed --noconfirm make"], log, env=msys_env,
+    )
+    return code == 0 and os.path.isfile(os.path.join(shell_usr_bin, "make.exe"))
+
 
 def _find_windows_msvc_build_tools(log=None) -> Optional[tuple[str, str, dict[str, str], str]]:
     env = _find_windows_msvc_environment(log)
     if not env:
         return None
-    bash, git_usr_bin = _find_windows_non_msys_bash()
+
+    bash, shell_usr_bin, is_msys = _find_windows_bash_for_msvc(env)
     if not bash:
+        if log:
+            log(
+                "ERROR: MSVC is initialized, but Bash was not found. FFmpeg configure needs "
+                "a POSIX shell; install Git for Windows or MSYS2."
+            )
         return None
-    make = _find_windows_gnu_make(env, git_usr_bin)
+
+    make = _find_windows_gnu_make(env, shell_usr_bin)
+    if not make and is_msys:
+        _install_msys2_gnu_make_if_available(bash, shell_usr_bin, env, log)
+        make = _find_windows_gnu_make(env, shell_usr_bin)
     if not make:
+        if log:
+            log(
+                "ERROR: MSVC is initialized, but GNU Make was not found. FFmpeg's build "
+                "system requires GNU Make (NMAKE is not a substitute). Install it with "
+                "MSYS2 'pacman -S make', or set DOWNLOADER_GNU_MAKE to the full make.exe path."
+            )
         return None
-    # Keep the Visual Studio linker ahead of Git Bash utilities: Git may ship
-    # a coreutils executable named link.exe which must not shadow MSVC LINK.
-    msvc_tool_dirs = []
+
+    # Keep Visual Studio's compiler and linker ahead of shell utilities: Git/MSYS
+    # may ship a coreutils executable named link.exe which must not shadow MSVC LINK.
+    msvc_tool_dirs: list[str] = []
     for executable in ("cl.exe", "link.exe", "nmake.exe"):
-        found = shutil.which(executable, path=env.get("PATH"))
+        found = shutil.which(executable, path=env.get("PATH", ""))
         if found:
             directory = os.path.dirname(found)
             if directory not in msvc_tool_dirs:
                 msvc_tool_dirs.append(directory)
-    path_parts = msvc_tool_dirs + [os.path.dirname(make), git_usr_bin]
-    env["PATH"] = os.pathsep.join(
-        [part for part in path_parts if part] + [env.get("PATH", "")]
-    )
-    if not all(shutil.which(name, path=env.get("PATH")) for name in ("cl.exe", "link.exe", "nmake.exe")):
+    path_parts = msvc_tool_dirs + [os.path.dirname(make), shell_usr_bin or ""]
+    deduplicated_path_parts: list[str] = []
+    seen_path_parts: set[str] = set()
+    for part in path_parts:
+        if not part:
+            continue
+        normalized = os.path.normcase(os.path.abspath(part))
+        if normalized not in seen_path_parts:
+            seen_path_parts.add(normalized)
+            deduplicated_path_parts.append(os.path.abspath(part))
+    env["PATH"] = os.pathsep.join(deduplicated_path_parts + [env.get("PATH", "")])
+
+    if is_msys:
+        # Use MSYS2's POSIX utilities only. The compiler remains Visual Studio's
+        # cl.exe/link.exe; do not select a MinGW/UCRT64 compiler environment.
+        env["MSYSTEM"] = "MSYS"
+        env["MSYS2_PATH_TYPE"] = "inherit"
+        env["CHERE_INVOKING"] = "1"
+
+    if not all(shutil.which(name, path=env.get("PATH", "")) for name in ("cl.exe", "link.exe", "nmake.exe")):
+        if log:
+            log("ERROR: The initialized build environment lost one or more MSVC tools after PATH setup.")
         return None
-    return bash, make, env, git_usr_bin
+
+    if log:
+        log(f"FFmpeg MSVC shell: {bash}")
+        log(f"FFmpeg GNU Make: {make}")
+        if is_msys:
+            log("Using MSYS2 Bash/Make as build utilities only; compilation remains native MSVC.")
+    return bash, make, env, shell_usr_bin or ""
 
 def _prepare_msvc_lame(workspace: str, env: dict[str, str], log) -> Optional[tuple[str, str, str]]:
     """Build a matching x64 LAME DLL/import library with the active MSVC toolchain."""
@@ -1024,11 +1343,16 @@ def _prepare_msvc_lame(workspace: str, env: dict[str, str], log) -> Optional[tup
         os.makedirs(os.path.join(include_dir, "lame"), exist_ok=True)
         os.makedirs(lib_dir, exist_ok=True)
         shutil.copy2(header, os.path.join(include_dir, "lame", "lame.h"))
+        # LAME's MSVC makefile names the import library libmp3lame.lib,
+        # but FFmpeg's MSVC linker wrapper resolves -lmp3lame as mp3lame.lib.
+        # Stage both names so FFmpeg's configure-time link test can find it.
         shutil.copy2(import_library, os.path.join(lib_dir, "libmp3lame.lib"))
+        shutil.copy2(import_library, os.path.join(lib_dir, "mp3lame.lib"))
     except OSError as exc:
         log(f"ERROR: Could not stage the MSVC LAME headers/library: {exc}")
         return None
-    log("MSVC-compatible libmp3lame.lib and libmp3lame.dll are ready.")
+    log("Staged MSVC LAME import library as both libmp3lame.lib and mp3lame.lib.")
+    log("MSVC-compatible LAME header, import library, and runtime DLL are ready.")
     return ("_downloader_deps/lame/include", "_downloader_deps/lame/lib", runtime_dll)
 
 
@@ -1343,9 +1667,10 @@ def _build_ffmpeg_windows(log) -> bool:
     if preference == "msvc":
         if not msvc_tools:
             log(
-                "ERROR: The MSVC build route needs Visual Studio 2019 16.8 or newer Build Tools, "
-                "Git for Windows Bash, and standalone GNU Make (not the MSYS2 copy). "
-                "Set DOWNLOADER_GNU_MAKE to make.exe when it is not on PATH."
+                "ERROR: The MSVC build route needs Visual Studio's x64 C++ workload, "
+                "Bash (Git Bash or MSYS2 shell utilities), and GNU Make. The compiler and "
+                "linker are initialized through Developer PowerShell; MSYS2's make package "
+                "is supported because it supplies build utilities, not the C compiler."
             )
             return False
         toolchain = "msvc"
@@ -1361,7 +1686,7 @@ def _build_ffmpeg_windows(log) -> bool:
     else:
         log(
             "ERROR: No supported Windows FFmpeg build environment was found. "
-            "Use MSVC Build Tools + Git Bash + GNU Make, or install an MSYS2 MinGW/UCRT64 toolchain."
+            "Use Visual Studio x64 C++ tools + Bash + GNU Make, or an MSYS2 MinGW/UCRT64 toolchain."
         )
         return False
 
@@ -1508,7 +1833,7 @@ make install || exit $?
         build_code = _run_streamed_process([bash, "-lc", build_script], log, env=env)
         lame_runtime_dll = None
     else:
-        bash, make, env, git_usr_bin = msvc_tools
+        bash, make, env, shell_usr_bin = msvc_tools
         env["FFMPEG_BUILD_WINDOWS"] = workspace
         amf_include = _prepare_windows_amf_headers(workspace, log)
         lame_paths = _prepare_msvc_lame(workspace, env, log)
@@ -1524,11 +1849,11 @@ INSTALLROOT="$BUILDROOT/_shared_install"
 cd "$BUILDROOT" || exit 90
 
 if ! command -v make >/dev/null 2>&1; then
-    echo "ERROR: GNU Make is unavailable in the selected non-MSYS2 shell."
+    echo "ERROR: GNU Make is unavailable in the selected Bash environment."
     exit 91
 fi
 if ! command -v cl.exe >/dev/null 2>&1 || ! command -v link.exe >/dev/null 2>&1; then
-    echo "ERROR: The Visual Studio compiler/linker environment was not inherited by Git Bash."
+    echo "ERROR: The Visual Studio compiler/linker environment was not inherited by Bash."
     exit 92
 fi
 if ! command -v nmake.exe >/dev/null 2>&1; then
@@ -1596,7 +1921,7 @@ make install || exit $?
 """.replace("__LAME_INCLUDE__", lame_include).replace("__LAME_LIB__", lame_lib)
         log(f"FFmpeg build shell: {bash}")
         log(f"FFmpeg GNU Make: {make}")
-        log("FFmpeg Windows compiler: native MSVC (/toolchain=msvc); MSYS2 is not used.")
+        log("FFmpeg Windows compiler: native MSVC (/toolchain=msvc); Bash/Make are build utilities only.")
         build_code = _run_streamed_process([bash, "-c", build_script], log, env=env)
 
     saved_config_log = _preserve_windows_configure_log(workspace, log)
