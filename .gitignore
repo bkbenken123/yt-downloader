@@ -1,6 +1,9 @@
 config.json
 downloader.exe
 /binaries/ffmpeg-build/
+/binaries/ffmpeg/
+/binaries/yt-dlp/
+/binaries/AMF/
 __pycache__/
 *.py[cod]
 *$py.class

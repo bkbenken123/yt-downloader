@@ -1,6 +1,6 @@
 # Downloader (C++ / Qt 6)
 
-This branch replaces the Python GUI/application in downloader.py with a native C++20 and Qt 6 application. The only non-C++ runtime components are external tools and source trees kept under binaries/ or discovered on PATH (yt-dlp, FFmpeg/FFprobe, Git, and optional platform build tools).
+This branch replaces the Python GUI/application in downloader.py with a native C++20 and Qt 6 application. The only non-C++ runtime components are external tools discovered under binaries/ or on PATH (yt-dlp, FFmpeg/FFprobe, Git, and optional platform build tools).
 
 ## Features
 
@@ -14,7 +14,7 @@ This branch replaces the Python GUI/application in downloader.py with a native C
 - Metadata/chapter embedding and FFmpeg-based cover-art embedding. Opus picture metadata is generated as a FLAC picture block and passed through FFmpeg's metadata muxing path; no Mutagen package is used by the application.
 - YouTube Music thumbnail URL handling and conservative detection/cropping of centered square cover art wrapped in flat 16:9 side borders.
 - Atomic config.json settings, startup dependency checks, and an explicit Tools & App update action.
-- FFmpeg source/build output separation. Compiled FFmpeg runtime files are installed in binaries/ffmpeg-build/bin/; the source checkout in binaries/ffmpeg/ is never used as the install directory.
+- FFmpeg runtime/build separation. Compiled FFmpeg runtime files are installed in binaries/ffmpeg-build/bin/; source checkouts are not part of the repository.
 
 ## Build
 
@@ -33,10 +33,9 @@ The application searches the dedicated build directory first, then the bundled b
 
 - FFmpeg and FFprobe: binaries/ffmpeg-build/bin/ or PATH.
 - yt-dlp: binaries/yt-dlp/, binaries/yt-dlp_linux on Linux, a packaged executable, or a system installation.
-- FFmpeg source used for compilation: binaries/ffmpeg/.
-- yt-dlp source checkout, when used: binaries/yt-dlp/.
+- Standalone yt-dlp executable: binaries/yt-dlp.exe or PATH.
 
-The application invokes yt-dlp as an external tool. A source checkout may be launched with an installed Python interpreter when no standalone yt-dlp executable is present; no downloader GUI, worker, settings, media pipeline, or application logic is implemented in Python.
+The application invokes yt-dlp as an external tool. No downloader GUI, worker, settings, media pipeline, or application logic is implemented in Python.
 
 ## Settings
 

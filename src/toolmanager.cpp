@@ -182,6 +182,20 @@ bool ToolManager::verifyFFmpeg(const QString &ffmpeg, const QString &ffprobe, co
 }
 
 bool ToolManager::prepare(const Log &log, const std::atomic_bool *cancel) {
+    const bool sourcePresent = QFileInfo(QDir(ffmpegSourceDirectory()).filePath(QStringLiteral("configure"))).isFile();
+    if (!sourcePresent) {
+        QString diagnostic;
+        const ToolPaths bundled = locate(&diagnostic);
+        if (!bundled.ffmpeg.isEmpty() && !bundled.ffprobe.isEmpty() && !bundled.ytdlpCommand.isEmpty() &&
+            verifyFFmpeg(bundled.ffmpeg, bundled.ffprobe, log)) {
+            log(QStringLiteral("Using FFmpeg, FFprobe, and yt-dlp bundled beside the application."));
+            if (!bundled.ytdlpVersion.isEmpty())
+                log(QStringLiteral("yt-dlp version: %1").arg(bundled.ytdlpVersion));
+            return true;
+        }
+        log(QStringLiteral("Bundled tool check failed. %1").arg(diagnostic));
+    }
+
     log(QStringLiteral("Preparing local FFmpeg and yt-dlp tools..."));
     bool ffmpegChanged = false;
     const bool ffmpegUpdateChecked = updateFFmpegSource(log, &ffmpegChanged, cancel);
