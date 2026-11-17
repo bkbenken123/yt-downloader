@@ -20,7 +20,7 @@ A lightweight desktop YouTube downloader built with **Python**, **yt-dlp**, **FF
 
 * Python 3.10 or newer
 * yt-dlp
-* MSYS2 C++ Compiler
+* C++ Compiler
 ---
 
 ## Installation
