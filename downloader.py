@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
 import importlib
 import importlib.util
 import json
@@ -225,18 +226,10 @@ def load_config() -> tuple[dict, Optional[str]]:
 
 def save_config(config: dict) -> None:
     normalized = _validated_config(config)
-    changed = {k: v for k, v in normalized.items() if v != DEFAULT_CONFIG[k]}
-    if not changed:
-        try:
-            if os.path.isfile(CONFIG_PATH):
-                os.remove(CONFIG_PATH)
-        except OSError as exc:
-            raise OSError(f"Could not remove config.json: {exc}") from exc
-        return
     temporary_path = CONFIG_PATH + ".tmp"
     try:
         with open(temporary_path, "w", encoding="utf-8") as handle:
-            json.dump(changed, handle, indent=2, ensure_ascii=False)
+            json.dump(normalized, handle, indent=2, ensure_ascii=False)
             handle.write("\n")
         os.replace(temporary_path, CONFIG_PATH)
     except Exception:
@@ -917,12 +910,27 @@ def _find_windows_msvc_environment(log=None) -> Optional[dict[str, str]]:
             if log:
                 log(f"WARNING: vswhere could not enumerate Visual Studio installations: {exc}")
 
-    for year in ("2026", "2022", "2019"):
-        for edition in ("BuildTools", "Community", "Professional", "Enterprise"):
-            installations.append(os.path.join(
-                os.environ.get("ProgramFiles", r"C:\Program Files"),
-                "Microsoft Visual Studio", year, edition,
-            ))
+    visual_studio_roots = {
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Microsoft Visual Studio"),
+        os.path.join(program_files_x86, "Microsoft Visual Studio"),
+    }
+    for visual_studio_root in visual_studio_roots:
+        try:
+            year_dirs = [
+                entry.path for entry in os.scandir(visual_studio_root)
+                if entry.is_dir()
+            ]
+        except OSError:
+            continue
+        for year_dir in year_dirs:
+            try:
+                edition_dirs = [
+                    entry.path for entry in os.scandir(year_dir)
+                    if entry.is_dir()
+                ]
+            except OSError:
+                continue
+            installations.extend(edition_dirs)
 
     # De-duplicate while preserving the best-first order.
     unique_installations: list[str] = []
@@ -1573,18 +1581,18 @@ def _copy_msys_runtime_dependencies(staged_bin: str, toolchain_bin: Optional[str
         log("WARNING: objdump was not found; external MinGW DLL dependencies could not be auto-collected.")
         return
     try:
-        queue_paths = [
+        queue_paths = deque(
             os.path.join(staged_bin, name)
             for name in os.listdir(staged_bin)
             if name.lower().endswith((".exe", ".dll"))
             and os.path.isfile(os.path.join(staged_bin, name))
-        ]
+        )
     except OSError:
         return
     seen: set[str] = set()
     copied: list[str] = []
     while queue_paths:
-        binary = queue_paths.pop(0)
+        binary = queue_paths.popleft()
         key = os.path.normcase(os.path.abspath(binary))
         if key in seen:
             continue
@@ -3207,10 +3215,86 @@ class Worker(threading.Thread):
         self.opts = opts
         self.q = output_queue
         self.proc: Optional[subprocess.Popen] = None
+        self.cancel_event = threading.Event()
+        self.active_output_folder: Optional[str] = None
+        self.active_before_download: dict[str, tuple[int, int]] = {}
         self.downloaded_files: list[str] = []
         self.ytdlp_reported_errors: list[str] = []
         self.preserved_thumbnail_paths: set[str] = set()
         self.last_opus_cover_embedding_succeeded = False
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        if sys.platform == "win32":
+            taskkill = shutil.which("taskkill") or os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe",
+            )
+            try:
+                subprocess.run(
+                    [taskkill, "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=10, check=False,
+                )
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _cleanup_cancelled_files(self) -> None:
+        folder = self.active_output_folder
+        if not folder:
+            return
+        candidates: set[str] = set(self.downloaded_files)
+        try:
+            for name in os.listdir(folder):
+                path = os.path.abspath(os.path.join(folder, name))
+                extension = os.path.splitext(name)[1].lower()
+                if (
+                    extension in CLEANUP_EXTS
+                    or ".temp." in name.lower()
+                    or (
+                        os.path.normcase(path) not in self.active_before_download
+                        and extension.lstrip(".") in DOWNLOAD_FILE_EXTENSIONS
+                    )
+                ):
+                    candidates.add(path)
+        except OSError:
+            pass
+        removed: list[str] = []
+        for path in candidates:
+            if not os.path.isfile(path):
+                continue
+            if os.path.normcase(path) in self.active_before_download:
+                try:
+                    current = os.stat(path)
+                except OSError:
+                    continue
+                if (
+                    current.st_mtime_ns == self.active_before_download[os.path.normcase(path)][0]
+                    and current.st_size == self.active_before_download[os.path.normcase(path)][1]
+                ):
+                    continue
+            try:
+                os.remove(path)
+                removed.append(path)
+            except OSError as exc:
+                self.q.put(("log", f"Could not remove cancelled download file {path}: {exc}"))
+        if removed:
+            self.q.put(("log", f"Removed cancelled temporary/output files: {', '.join(removed)}"))
 
     def _log_capabilities(self) -> None:
         features = detect_ffmpeg_features()
@@ -3268,19 +3352,28 @@ class Worker(threading.Thread):
             return None
         try:
             env, temp_dir = _ytdlp_environment()
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [*command, url, "--dump-single-json", "--flat-playlist",
                  "--no-warnings", "--yes-playlist", "--paths", f"temp:{temp_dir}"],
-                capture_output=True, text=True, timeout=45, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=env,
             )
+            self.proc = proc
+            stdout, stderr = proc.communicate(timeout=45)
+            self.proc = None
             if proc.returncode == 0:
-                data = json.loads(proc.stdout)
+                data = json.loads(stdout)
                 if is_playlist_info(data):
                     return data.get("title") or "playlist"
-            elif proc.stderr.strip():
-                self.q.put(("log", f"Playlist title lookup failed: {proc.stderr.strip()}"))
+            elif stderr.strip():
+                self.q.put(("log", f"Playlist title lookup failed: {stderr.strip()}"))
+        except subprocess.TimeoutExpired:
+            if self.proc is not None:
+                self.cancel()
+            self.proc = None
+            self.q.put(("log", "Playlist title lookup timed out."))
         except Exception as exc:
+            self.proc = None
             self.q.put(("log", f"Playlist title lookup failed: {exc}"))
         return None
 
@@ -3299,6 +3392,9 @@ class Worker(threading.Thread):
         try:
             if proc.stdout is not None:
                 for line in iter(proc.stdout.readline, ""):
+                    if self.cancelled:
+                        self.cancel()
+                        break
                     if line == "":
                         break
                     text = line.rstrip()
@@ -3492,6 +3588,7 @@ class Worker(threading.Thread):
         except Exception as exc:
             self.q.put(("error", f"Failed to start yt-dlp: {exc}"))
             return False
+        self.proc = proc
         reported_paths: set[str] = set()
         reported_errors: list[str] = []
         destination_re = re.compile(r"Destination:\s+(.*)")
@@ -3499,6 +3596,9 @@ class Worker(threading.Thread):
         thumbnail_re = re.compile(r"Writing video thumbnail\s+\d+\s+to:\s+(.*)")
         if proc.stdout is not None:
             for line in iter(proc.stdout.readline, ""):
+                if self.cancelled:
+                    self.cancel()
+                    break
                 if line == "":
                     break
                 text = line.rstrip()
@@ -3518,6 +3618,9 @@ class Worker(threading.Thread):
                 if match:
                     reported_paths.add(os.path.abspath(match.group(1).strip().strip('"')))
         proc.wait()
+        self.proc = None
+        if self.cancelled:
+            return False
         self.downloaded_files.extend(sorted(reported_paths))
         self.ytdlp_reported_errors = reported_errors
 
@@ -4287,9 +4390,13 @@ class Worker(threading.Thread):
         self.q.put(("log", f"=== Link {index}/{total}: {url} ==="))
         mode = self.opts["mode"]
         outtmpl, out_folder = self._build_outtmpl(out_folder, mode)
+        self.active_output_folder = out_folder
         self.q.put(("log", f"Output template: {outtmpl}"))
         before_download = snapshot_output_files(out_folder)
+        self.active_before_download = before_download
         ytdlp_complete = self._run_yt_dlp_subprocess(outtmpl, mode)
+        if self.cancelled:
+            return False, out_folder
         if not ytdlp_complete:
             self.q.put((
                 "log",
@@ -4360,6 +4467,8 @@ class Worker(threading.Thread):
         successful_outputs: list[str] = []
         successful_pairs: list[tuple[str, str, Optional[str]]] = []
         for src in candidates:
+            if self.cancelled:
+                return False, out_folder
             final = build_final_path(src, self.opts["container"])
             source_stem = os.path.normcase(os.path.splitext(os.path.basename(src))[0])
             thumbnail_path = (
@@ -4442,7 +4551,11 @@ class Worker(threading.Thread):
         except Exception as exc:
             self.q.put(("error", f"Worker exception: {exc}"))
         finally:
-            self.q.put(("done", out_folder))
+            if self.cancelled:
+                self._cleanup_cancelled_files()
+                self.q.put(("cancelled", out_folder))
+            else:
+                self.q.put(("done", out_folder))
 
 
 # ---------------------------------------------------------------------------
@@ -4457,6 +4570,7 @@ class App:
         self.root.minsize(900, 520)
         self.q: queue.Queue = queue.Queue()
         self.worker: Optional[Worker] = None
+        self.cancel_btn: Optional[ttk.Button] = None
         self.settings, config_warning = load_config()
         self.settings_window: Optional[tk.Toplevel] = None
         self.ffmpeg_update_button: Optional[ttk.Button] = None
@@ -4518,6 +4632,10 @@ class App:
         controls.pack(fill="x")
         self.start_btn = ttk.Button(controls, text="Start", command=self.start, state="disabled")
         self.start_btn.pack(side="left")
+        self.cancel_btn = ttk.Button(
+            controls, text="Cancel", command=self.cancel, state="disabled",
+        )
+        self.cancel_btn.pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="Open Output Folder", command=self.open_outdir).pack(
             side="left", padx=6,
         )
@@ -5018,6 +5136,16 @@ class App:
         except OSError as exc:
             messagebox.showerror("Could not open folder", str(exc))
 
+    def cancel(self) -> None:
+        worker = self.worker
+        if worker is None or not worker.is_alive():
+            return
+        worker.cancel()
+        self.status_var.set("Cancelling")
+        if self.cancel_btn is not None:
+            self.cancel_btn.configure(state="disabled")
+        self.log("Cancellation requested; stopping the active process and cleaning up temporary files.")
+
     def start(self) -> None:
         if self.startup_prepare_in_progress:
             messagebox.showinfo(
@@ -5097,6 +5225,8 @@ class App:
         }
         self.status_var.set("Running")
         self.start_btn.configure(state="disabled")
+        if self.cancel_btn is not None:
+            self.cancel_btn.configure(state="normal")
         self.worker = Worker(urls, options, self.q)
         self.worker.start()
         self.log(f"Worker started with {len(urls)} link(s).")
@@ -5115,6 +5245,15 @@ class App:
                     self.log(f"Finished. Output folder: {folder}")
                     self.status_var.set("Idle")
                     self.start_btn.configure(state="normal")
+                    if self.cancel_btn is not None:
+                        self.cancel_btn.configure(state="disabled")
+                elif kind == "cancelled":
+                    folder = item[1]
+                    self.log(f"Cancelled. Temporary files were cleaned up. Output folder: {folder}")
+                    self.status_var.set("Idle")
+                    self.start_btn.configure(state="normal")
+                    if self.cancel_btn is not None:
+                        self.cancel_btn.configure(state="disabled")
                 elif kind == "startup_tools_done":
                     ffmpeg_ready, ytdlp_ready = bool(item[1]), bool(item[2])
                     self.startup_prepare_in_progress = False
@@ -5123,6 +5262,8 @@ class App:
                         self.ffmpeg_update_button.configure(state="normal")
                     if self.startup_tools_ready:
                         self.start_btn.configure(state="normal")
+                        if self.cancel_btn is not None:
+                            self.cancel_btn.configure(state="disabled")
                         self.status_var.set("Idle")
                         self.log("Startup tool preparation finished. FFmpeg and yt-dlp are ready.")
                     else:
