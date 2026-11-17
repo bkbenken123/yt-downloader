@@ -6,6 +6,7 @@
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QTemporaryFile>
+#include <QStandardPaths>
 
 static QString findEnvExe(const QString &name, const QProcessEnvironment &env) {
     for (const QString &part : env.value(QStringLiteral("PATH")).split(QDir::listSeparator(), Qt::SkipEmptyParts)) {

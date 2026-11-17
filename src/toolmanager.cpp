@@ -183,31 +183,18 @@ bool ToolManager::verifyFFmpeg(const QString &ffmpeg, const QString &ffprobe, co
 
 bool ToolManager::prepare(const Log &log, const std::atomic_bool *cancel) {
     log(QStringLiteral("Preparing local FFmpeg and yt-dlp tools..."));
-    const bool ffmpegReady = ensureFFmpeg(log, cancel);
-    if (ffmpegReady && isGitCheckout(ffmpegSourceDirectory())) {
-        const QString git = QStandardPaths::findExecutable(QStringLiteral("git"));
-        if (!git.isEmpty()) {
-            log(QStringLiteral("Checking FFmpeg source for available updates..."));
-            const ProcessResult fetch = ProcessRunner::run(git,
-                {QStringLiteral("fetch"), QStringLiteral("--quiet"), QStringLiteral("--prune")},
-                ffmpegSourceDirectory(), QProcessEnvironment::systemEnvironment(), 180000, cancel);
-            if (fetch.exitCode == 0) {
-                const ProcessResult behind = ProcessRunner::run(git,
-                    {QStringLiteral("rev-list"), QStringLiteral("--count"), QStringLiteral("HEAD..@{upstream}")},
-                    ffmpegSourceDirectory(), QProcessEnvironment::systemEnvironment(), 15000, cancel);
-                bool ok = false;
-                const int count = behind.output.trimmed().toInt(&ok);
-                if (behind.exitCode == 0 && ok && count > 0)
-                    log(QStringLiteral("FFmpeg source has %1 upstream commit(s) available. Use Settings > Check / Update Tools and Application to update and rebuild.").arg(count));
-                else if (behind.exitCode == 0 && ok)
-                    log(QStringLiteral("FFmpeg source is up to date."));
-                else
-                    log(QStringLiteral("FFmpeg remote fetched; no upstream tracking branch is configured."));
-            } else {
-                log(QStringLiteral("WARNING: Could not check FFmpeg updates: %1").arg(fetch.output.trimmed().right(800)));
-            }
-        }
+    bool ffmpegChanged = false;
+    const bool ffmpegUpdateChecked = updateFFmpegSource(log, &ffmpegChanged, cancel);
+    if (!ffmpegUpdateChecked)
+        log(QStringLiteral("WARNING: FFmpeg source update check did not complete; validating the existing source/build."));
+    if (ffmpegChanged) {
+        const QString marker = QDir(binariesDirectory()).filePath(
+            QStringLiteral("ffmpeg-build/.downloader-build-profile.json"));
+        QFile::remove(marker);
+        log(QStringLiteral("FFmpeg source changed; the runtime will be rebuilt."));
     }
+    const bool ffmpegReady = ensureFFmpeg(log, cancel);
+
     bool ytdlpChanged = false;
     const bool ytdlpReady = updateYtdlp(log, &ytdlpChanged, cancel);
     Q_UNUSED(ytdlpChanged);
