@@ -20,19 +20,6 @@ This branch replaces the Python GUI/application in downloader.py with a native C
 
 Required: CMake 3.24 or newer, a C++20 compiler, and Qt 6.6 or newer with Core, Gui, Widgets, and Network modules.
 
-### Windows (MSVC / Visual Studio)
-
-Open a Visual Studio Developer PowerShell for the desired architecture and configure/build with the Qt MSVC kit:
-
-    cmake -S . -B build -DCMAKE_PREFIX_PATH="C:\Qt\6.x.x\msvc2022_64"
-    cmake --build build --config Release --parallel
-
-Run build\Release\downloader.exe (or the output path selected by your generator). The application searches upward from the executable for the repository/application root containing binaries/, so it can run from the CMake build directory.
-
-For an FFmpeg source rebuild on Windows, install an MSYS2 UCRT64, MINGW64, or CLANG64 build environment with GNU make and the FFmpeg development packages. The updater installs the relevant packages with pacman and uses the isolated DownloaderFFmpegBuild workspace. Set MSYS2_ROOT if MSYS2 is not installed in a standard location. DOWNLOADER_FFMPEG_TOOLCHAIN accepts auto or msys2.
-
-### Linux
-
 Install a C++20 toolchain, CMake, Qt 6 development packages, FFmpeg build dependencies, pkg-config, git, bash, and GNU make. Configure and build:
 
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
