@@ -3389,9 +3389,15 @@ class Worker(threading.Thread):
             and is_youtube_music_url(self.url)
             and container in COVER_ART_AUDIO_CONTAINERS
         )
+        force_app_audio_cover = (
+            mode == "audio"
+            and embed_metadata
+            and container == "m4a"
+        )
         ytdlp_can_embed_thumbnail = (
             embed_metadata
             and not youtube_music_audio_cover
+            and not force_app_audio_cover
             and container in YTDLP_THUMBNAIL_CONTAINERS
             and (
                 mode != "audio"
@@ -3407,6 +3413,15 @@ class Worker(threading.Thread):
             and not ytdlp_can_embed_thumbnail
             and container in COVER_ART_AUDIO_CONTAINERS
         )
+        # Keep cover-art audio conversion in this app's FFmpeg path. This makes
+        # the thumbnail and final M4A part of one mux operation instead of
+        # relying on yt-dlp's postprocessor followed by a second remux.
+        if native_audio_conversion and ffmpeg_thumbnail_fallback:
+            native_audio_conversion = False
+            self.q.put((
+                "log",
+                f"Using the app FFmpeg path for {container} so the final audio mux includes the cover art.",
+            ))
 
         if mode == "audio" and not native_audio_conversion:
             if not self.opts.get("use_ytdlp_audio_conversion", True):
@@ -3533,6 +3548,18 @@ class Worker(threading.Thread):
             and bool(reported_errors)
             and all(is_unavailable_playlist_item_error(error) for error in reported_errors)
         )
+        cookie_copy_error = any(
+            "Could not copy Chrome cookie database" in error
+            for error in reported_errors
+        )
+        if cookie_copy_error:
+            self.q.put((
+                "error",
+                "The selected browser cookie database is locked. Close every Edge window "
+                "(including background Edge processes), then retry the download. "
+                "If Edge is already closed, select None, save Settings, then select Edge again "
+                "to refresh the browser-cookie selection.",
+            ))
         if reported_errors and not only_unavailable_playlist_items:
             self.q.put((
                 "error",
@@ -3640,14 +3667,16 @@ class Worker(threading.Thread):
             return self._audio_args(fallback, mode)
         return ["-c:a", "copy"]
 
-    def _muxer_args(self, dst: str, video_codec: Optional[str]) -> list[str]:
+    def _muxer_args(
+        self, dst: str, video_codec: Optional[str], cover_art: bool = False,
+    ) -> list[str]:
         extension = os.path.splitext(dst)[1].lower()
         args: list[str] = []
         # use_metadata_tags preserves yt-dlp metadata fields the mov muxer would
         # otherwise silently drop.
         if extension in (".mp4", ".mov"):
             args += ["-movflags", "+faststart+use_metadata_tags"]
-        elif extension == ".m4a":
+        elif extension == ".m4a" and not cover_art:
             args += ["-movflags", "+use_metadata_tags"]
         if video_codec == "h265" and extension in (".mp4", ".mov"):
             args += ["-tag:v:0", "hvc1"]
@@ -3930,10 +3959,12 @@ class Worker(threading.Thread):
             if thumbnail_path and os.path.isfile(thumbnail_path):
                 cmd += ["-i", thumbnail_path]
                 cmd += ["-map", "0:a:0?", "-map", "1:v:0?"]
-                cmd += ["-c:v", "mjpeg", "-disposition:v", "attached_pic"]
-                if extension == "mp3":
-                    cmd += ["-metadata:s:v", "title=Album cover",
-                            "-metadata:s:v", "comment=Cover (front)"]
+                cmd += [
+                    "-c:v:0", "mjpeg",
+                    "-disposition:v:0", "attached_pic",
+                    "-metadata:s:v:0", "title=Album cover",
+                    "-metadata:s:v:0", "comment=Cover (front)",
+                ]
             else:
                 thumb_index = probe_input_thumbnail_stream(src)
                 if thumb_index is not None:
@@ -3941,10 +3972,12 @@ class Worker(threading.Thread):
                     # mjpeg is accepted as APIC/PICTURE/covr in the other audio
                     # containers supported by this FFmpeg path. Ogg Opus is
                     # intentionally handled by the Mutagen path above.
-                    cmd += ["-c:v", "mjpeg", "-disposition:v", "attached_pic"]
-                    if extension == "mp3":
-                        cmd += ["-metadata:s:v", "title=Album cover",
-                                "-metadata:s:v", "comment=Cover (front)"]
+                    cmd += [
+                        "-c:v:0", "mjpeg",
+                        "-disposition:v:0", "attached_pic",
+                        "-metadata:s:v:0", "title=Album cover",
+                        "-metadata:s:v:0", "comment=Cover (front)",
+                    ]
                 else:
                     cmd += ["-map", "0:a:0?", "-vn"]
                     self.q.put((
@@ -3958,7 +3991,10 @@ class Worker(threading.Thread):
         if self.opts.get("embed_metadata", False):
             cmd += ["-map_chapters", "0"]
         cmd += self._resolved_audio_args(src, dst, audio_codec, "audio")
-        cmd += self._muxer_args(dst, None)
+        cmd += self._muxer_args(
+            dst, None,
+            cover_art=bool(thumbnail_path and os.path.isfile(thumbnail_path)),
+        )
         cmd += [dst]
 
         converted = self._run_ffmpeg_attempt("Audio conversion", cmd, dst, expected_mode="audio")
@@ -4314,6 +4350,10 @@ class Worker(threading.Thread):
                 target_container,
                 bool(self.opts.get("embed_metadata", False)),
                 bool(self.opts.get("use_ytdlp_audio_conversion", True)),
+            )
+            and not (
+                bool(self.opts.get("embed_metadata", False))
+                and target_container == "m4a"
             )
         )
         use_ytdlp_video = (mode == "video" and self._use_ytdlp_video_native())
