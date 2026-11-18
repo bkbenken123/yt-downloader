@@ -378,26 +378,16 @@ def _ytdlp_source_main() -> Optional[str]:
 
 def _ytdlp_environment() -> tuple[dict[str, str], str]:
     environment = os.environ.copy()
-    bases = (
-        environment.get("LOCALAPPDATA"),
-        environment.get("XDG_CACHE_HOME"),
-        environment.get("TEMP"),
-        environment.get("TMP"),
-        tempfile.gettempdir(),
-    )
-    for base in bases:
-        if not base:
-            continue
-        candidate = os.path.abspath(os.path.join(base, YTDLP_TEMP_DIR_NAME))
-        try:
-            os.makedirs(candidate, exist_ok=True)
-            if os.access(candidate, os.W_OK):
-                environment["TEMP"] = candidate
-                environment["TMP"] = candidate
-                return environment, candidate
-        except OSError:
-            continue
-    raise OSError("Could not create a writable temporary directory for yt-dlp")
+    candidate = os.path.abspath(os.path.join(BINARIES_DIR, YTDLP_TEMP_DIR_NAME))
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        if os.access(candidate, os.W_OK):
+            environment["TEMP"] = candidate
+            environment["TMP"] = candidate
+            return environment, candidate
+    except OSError:
+        pass
+    raise OSError("Could not create a writable temporary directory inside the binaries folder")
 
 
 def _prune_ytdlp_checkout() -> None:
@@ -973,9 +963,12 @@ def _find_windows_msvc_environment(log=None) -> Optional[dict[str, str]]:
         batch_path = None
         marker = "__DOWNLOADER_VSDEV_ENV_BEGIN__"
         try:
+            temp_dir = os.path.join(BINARIES_DIR, "build-temp")
+            os.makedirs(temp_dir, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".bat", prefix="downloader-vsdev-",
                 encoding="utf-8", newline="\r\n", delete=False,
+                dir=temp_dir,
             ) as batch:
                 batch_path = batch.name
                 if setup_script.lower().endswith("vsdevcmd.bat"):
@@ -1410,27 +1403,14 @@ def _prepare_windows_hardware_build_dependencies(
 
 
 def _windows_ffmpeg_build_workspace(log) -> Optional[str]:
-    candidates = []
-    for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("TEMP"),
-                 os.environ.get("PUBLIC"), r"C:\Users\Public"):
-        if not base:
-            continue
-        candidate = os.path.abspath(os.path.join(base, "DownloaderFFmpegBuild"))
-        if " " in candidate:
-            continue
-        if candidate not in candidates:
-            candidates.append(candidate)
-    for candidate in candidates:
-        try:
-            os.makedirs(os.path.dirname(candidate), exist_ok=True)
-            return candidate
-        except OSError:
-            continue
-    log(
-        "ERROR: Could not find a writable Windows build path without spaces. "
-        "Set LOCALAPPDATA, TEMP, or PUBLIC to a writable no-space path and run again."
-    )
-    return None
+    candidate = os.path.abspath(os.path.join(FFMPEG_OUTPUT_DIR, "workspace"))
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        log(f"Using FFmpeg build workspace inside the binaries folder: {candidate}")
+        return candidate
+    except OSError as exc:
+        log(f"ERROR: Could not create the in-folder FFmpeg build workspace: {exc}")
+        return None
 
 
 def _prepare_windows_ffmpeg_workspace(log) -> Optional[str]:

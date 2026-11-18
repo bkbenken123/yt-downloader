@@ -1,6 +1,8 @@
 config.json
 downloader.exe
 /binaries/ffmpeg-build/
+/binaries/build-temp/
+/binaries/yt-downloader-temp/
 __pycache__/
 *.py[cod]
 *$py.class
