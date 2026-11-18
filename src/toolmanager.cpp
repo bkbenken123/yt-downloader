@@ -16,6 +16,9 @@
 static const QString kProfile = QStringLiteral("all-vendors-win-linux-v5-required-codecs");
 
 QString ToolManager::appDirectory() {
+    const QString bundledRoot = qEnvironmentVariable("DOWNLOADER_BUNDLED_ROOT");
+    if (!bundledRoot.isEmpty() && QDir(bundledRoot).exists())
+        return QDir(bundledRoot).absolutePath();
     QDir directory(QCoreApplication::applicationDirPath());
     for (int depth = 0; depth < 8; ++depth) {
         if (QDir(directory.filePath(QStringLiteral("binaries"))).exists())

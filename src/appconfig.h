@@ -18,6 +18,11 @@ struct AppConfig {
     bool embedMetadata = false;
 
     static QString configPath() {
+        const QString configuredRoot = qEnvironmentVariable("DOWNLOADER_CONFIG_ROOT");
+        if (!configuredRoot.isEmpty()) {
+            QDir().mkpath(configuredRoot);
+            return QDir(configuredRoot).filePath(QStringLiteral("config.json"));
+        }
         QDir directory(QCoreApplication::applicationDirPath());
         for (int depth = 0; depth < 6; ++depth) {
             if (QDir(directory.filePath(QStringLiteral("binaries"))).exists())
