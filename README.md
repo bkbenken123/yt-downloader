@@ -1,7 +1,3 @@
-# Downloader (C++ / Qt 6)
-
-This branch replaces the Python GUI/application in downloader.py with a native C++20 and Qt 6 application. The only non-C++ runtime components are external tools discovered under binaries/ or on PATH (yt-dlp, FFmpeg/FFprobe, Git, and optional platform build tools).
-
 ## Features
 
 - Video, audio, and thumbnail-only downloads.
