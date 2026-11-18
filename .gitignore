@@ -26,3 +26,5 @@ venv/
 .venv/
 env/
 /binaries/dependencies
+/binaries/ffmpeg/
+/binaries/yt-dlp/

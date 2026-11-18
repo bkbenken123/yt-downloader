@@ -2431,6 +2431,18 @@ def update_ffmpeg_source_checkout(log) -> tuple[bool, bool, str]:
 
 
 def ensure_ffmpeg_ready(log, force_rebuild: bool = False) -> bool:
+    if not _prepare_git_dependency(
+        FFMPEG_SOURCE_DIR,
+        FFMPEG_GIT_URLS[0],
+        "configure",
+        "FFmpeg source",
+        log,
+    ):
+        log(
+            f"ERROR: Could not create the FFmpeg source checkout at {FFMPEG_SOURCE_DIR}. "
+            "The preinstalled FFmpeg fallback is disabled."
+        )
+        return False
     if _ffmpeg_source_checkout_exists():
         ffmpeg = _ffmpeg_built_tool("ffmpeg")
         ffprobe = _ffmpeg_built_tool("ffprobe")
@@ -2509,6 +2521,22 @@ def ensure_ffmpeg_ready(log, force_rebuild: bool = False) -> bool:
 
 def update_ytdlp_installation() -> tuple[bool, list[str]]:
     messages: list[str] = []
+    git = shutil.which("git")
+    if not _git_checkout_ready(YTDLP_SOURCE_DIR, "yt_dlp/__main__.py"):
+        if not git:
+            messages.append("ERROR: Git was not found, so the yt-dlp source subtree could not be created.")
+            return False, messages
+        messages.append("Creating yt-dlp source checkout...")
+        code, output = _run_update_command(
+            [git, "clone", "--depth", "1", YTDLP_GIT_URL, YTDLP_SOURCE_DIR],
+            timeout=900,
+            cwd=APP_SOURCE_DIR,
+        )
+        if output:
+            messages.extend(line for line in output.splitlines() if line.strip())
+        if code != 0 or not _git_checkout_ready(YTDLP_SOURCE_DIR, "yt_dlp/__main__.py"):
+            messages.append("ERROR: Could not create the yt-dlp source checkout.")
+            return False, messages
     source_main = _ytdlp_source_main()
     if not source_main:
         messages.append("ERROR: The yt-dlp source subtree was not found at binaries/yt-dlp.")
@@ -2516,21 +2544,19 @@ def update_ytdlp_installation() -> tuple[bool, list[str]]:
     git = shutil.which("git")
     if not git:
         messages.append("WARNING: Git was not found on PATH, so yt-dlp could not be updated.")
-    elif _app_git_checkout(git):
-        messages.append("Checking yt-dlp Git subtree for updates...")
-        pulled, output = _pull_git_subtree(
-            git,
-            os.path.relpath(YTDLP_SOURCE_DIR, APP_SOURCE_DIR),
-            YTDLP_GIT_URL,
+    else:
+        messages.append("Checking yt-dlp source checkout for updates...")
+        code, output = _run_update_command(
+            [git, "pull", "--ff-only"],
+            timeout=300,
+            cwd=YTDLP_SOURCE_DIR,
         )
         if output:
             messages.extend(line for line in output.splitlines() if line.strip())
-        if pulled:
-            messages.append("yt-dlp Git subtree is up to date.")
+        if code == 0:
+            messages.append("yt-dlp source checkout is up to date.")
         else:
-            messages.append("WARNING: Could not pull the yt-dlp Git subtree; using the existing source.")
-    else:
-        messages.append("WARNING: The application is not a Git checkout, so the yt-dlp Git subtree cannot be pulled.")
+            messages.append("WARNING: Could not pull the yt-dlp source checkout; using the existing source.")
     verify_code, version_output = _run_update_command(
         [sys.executable, source_main, "--version"], timeout=30,
     )
