@@ -253,10 +253,6 @@ def find_local_executable(candidates: Iterable[str]) -> Optional[str]:
             path = os.path.join(directory, candidate)
             if os.path.isfile(path):
                 return os.path.abspath(path)
-    for candidate in candidates:
-        path = shutil.which(candidate)
-        if path:
-            return os.path.abspath(path)
     return None
 
 
@@ -371,9 +367,6 @@ def find_ffmpeg_executable(name: str) -> Optional[str]:
     built = _ffmpeg_built_tool(name)
     if built:
         return built
-    if sys.platform.startswith("linux"):
-        path = shutil.which(name)
-        return os.path.abspath(path) if path else None
     candidates = [f"{name}.exe", name] if sys.platform == "win32" else [name]
     return find_local_executable(candidates)
 
@@ -441,17 +434,6 @@ def _ytdlp_is_standalone_git_checkout(git: str) -> bool:
 
 
 def find_ytdlp_executable() -> Optional[str]:
-    if sys.platform.startswith("linux"):
-        path = os.path.join(BINARIES_DIR, "yt-dlp_linux")
-        if os.path.isfile(path):
-            if not os.access(path, os.X_OK):
-                try:
-                    current_mode = os.stat(path).st_mode
-                    os.chmod(path, current_mode | 0o100)
-                except OSError:
-                    return None
-            return os.path.abspath(path)
-        return find_local_executable(["yt-dlp", "yt_dlp"])
     repo_candidates = [
         os.path.join(YTDLP_SOURCE_DIR, "yt-dlp.exe"),
         os.path.join(YTDLP_SOURCE_DIR, "dist", "yt-dlp.exe"),
@@ -459,7 +441,7 @@ def find_ytdlp_executable() -> Optional[str]:
     for path in repo_candidates:
         if os.path.isfile(path):
             return os.path.abspath(path)
-    return find_local_executable(["yt-dlp.exe", "yt-dlp", "yt_dlp.exe", "yt_dlp"])
+    return None
 
 
 def sanitize_filename(name: str) -> str:
@@ -542,21 +524,6 @@ def get_ytdlp_command() -> Optional[list[str]]:
     source_main = _ytdlp_source_main()
     if source_main:
         return [sys.executable, source_main]
-    executable = find_ytdlp_executable()
-    if executable:
-        return [executable]
-    system_ytdlp = shutil.which("yt-dlp")
-    if system_ytdlp:
-        return [system_ytdlp]
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "yt_dlp", "--version"],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-        if proc.returncode == 0:
-            return [sys.executable, "-m", "yt_dlp"]
-    except Exception:
-        pass
     return None
 
 
@@ -2311,9 +2278,8 @@ def check_ffmpeg_update_available(log) -> tuple[bool, bool, str]:
     is_git_checkout = probe_code == 0 and probe_output.strip().lower().endswith("true")
     if not is_git_checkout:
         message = (
-            "FFmpeg update availability cannot be checked yet because binaries/ffmpeg is a plain "
-            "source tree without Git metadata. Use Settings -> Check / Update FFmpeg once to "
-            "convert it to a Git checkout."
+            "FFmpeg binaries/ffmpeg is an embedded Git subtree; use Settings -> "
+            "Check / Update Tools & App to pull it."
         )
         log(f"WARNING: {message}")
         return False, False, message
@@ -2534,22 +2500,9 @@ def ensure_ffmpeg_ready(log, force_rebuild: bool = False) -> bool:
             return False
         log("ERROR: FFmpeg build finished, but the executable/runtime set is incomplete.")
         return False
-    ffmpeg = find_ffmpeg_executable("ffmpeg")
-    ffprobe = find_ffmpeg_executable("ffprobe")
-    if ffmpeg and ffprobe:
-        runtime_ok, runtime_error = _verify_ffmpeg_runtime(ffmpeg, ffprobe)
-        if not runtime_ok:
-            log(f"ERROR: Existing FFmpeg installation could not start: {runtime_error}")
-            return False
-        encoders_ok, encoders_error = _verify_ffmpeg_required_encoders(ffmpeg)
-        if not encoders_ok:
-            log(f"ERROR: Existing FFmpeg installation is missing a required codec: {encoders_error}")
-            return False
-        log(f"Using existing FFmpeg installation: {ffmpeg}")
-        return True
     log(
-        f"ERROR: No FFmpeg source checkout was found at {FFMPEG_SOURCE_DIR}, "
-        "and no usable FFmpeg installation was found."
+        f"ERROR: No FFmpeg source subtree was found at {FFMPEG_SOURCE_DIR}, "
+        "and no FFmpeg build exists in binaries/ffmpeg-build."
     )
     return False
 
@@ -2557,67 +2510,36 @@ def ensure_ffmpeg_ready(log, force_rebuild: bool = False) -> bool:
 def update_ytdlp_installation() -> tuple[bool, list[str]]:
     messages: list[str] = []
     source_main = _ytdlp_source_main()
-    if source_main:
-        git = shutil.which("git")
-        if not git:
-            messages.append("WARNING: Git was not found on PATH, so yt-dlp could not be updated.")
-        else:
-            messages.append("Checking yt-dlp for updates...")
-            if _app_git_checkout(git):
-                pulled, output = _pull_git_subtree(
-                    git,
-                    os.path.relpath(YTDLP_SOURCE_DIR, APP_SOURCE_DIR),
-                    YTDLP_GIT_URL,
-                )
-                if output:
-                    messages.extend(line for line in output.splitlines() if line.strip())
-                if pulled:
-                    messages.append("yt-dlp Git subtree pull completed.")
-                else:
-                    messages.append("WARNING: Could not pull the yt-dlp Git subtree; using the existing checkout.")
-            else:
-                messages.append("WARNING: The application is not a Git checkout, so the yt-dlp Git subtree cannot be pulled.")
-        verify_code, version_output = _run_update_command(
-            [sys.executable, source_main, "--version"], timeout=30,
-        )
-        if version_output:
-            messages.append(f"yt-dlp source version: {version_output.splitlines()[-1]}")
-        if verify_code == 0:
-            return True, messages
-        messages.append("ERROR: The cloned yt-dlp source checkout could not be executed.")
+    if not source_main:
+        messages.append("ERROR: The yt-dlp source subtree was not found at binaries/yt-dlp.")
         return False, messages
-    executable = find_ytdlp_executable()
-    if executable:
-        code, output = _run_update_command([executable, "-U"])
-        messages.append(f"yt-dlp standalone updater: {executable}")
+    git = shutil.which("git")
+    if not git:
+        messages.append("WARNING: Git was not found on PATH, so yt-dlp could not be updated.")
+    elif _app_git_checkout(git):
+        messages.append("Checking yt-dlp Git subtree for updates...")
+        pulled, output = _pull_git_subtree(
+            git,
+            os.path.relpath(YTDLP_SOURCE_DIR, APP_SOURCE_DIR),
+            YTDLP_GIT_URL,
+        )
         if output:
             messages.extend(line for line in output.splitlines() if line.strip())
-        if code == 0:
-            command = get_ytdlp_command()
-            return command is not None, messages
-        messages.append("Standalone update did not succeed; trying pip.")
-    pip_base = [
-        sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp",
-        "--disable-pip-version-check",
-    ]
-    attempts = [pip_base]
-    if sys.prefix == getattr(sys, "base_prefix", sys.prefix):
-        attempts.append([*pip_base, "--user"])
-    for command in attempts:
-        code, output = _run_update_command(command)
-        messages.append(f"yt-dlp pip updater: {command_text(command)}")
-        if output:
-            messages.extend(line for line in output.splitlines() if line.strip())
-        if code == 0:
-            break
+        if pulled:
+            messages.append("yt-dlp Git subtree is up to date.")
+        else:
+            messages.append("WARNING: Could not pull the yt-dlp Git subtree; using the existing source.")
     else:
-        return get_ytdlp_command() is not None, messages
+        messages.append("WARNING: The application is not a Git checkout, so the yt-dlp Git subtree cannot be pulled.")
     verify_code, version_output = _run_update_command(
-        [sys.executable, "-m", "yt_dlp", "--version"], timeout=20,
+        [sys.executable, source_main, "--version"], timeout=30,
     )
     if version_output:
-        messages.append(f"Installed yt-dlp version: {version_output.splitlines()[-1]}")
-    return verify_code == 0 or get_ytdlp_command() is not None, messages
+        messages.append(f"yt-dlp source version: {version_output.splitlines()[-1]}")
+    if verify_code == 0:
+        return True, messages
+    messages.append("ERROR: The yt-dlp source subtree could not be executed.")
+    return False, messages
 
 
 def _app_git_checkout(git: str) -> bool:
