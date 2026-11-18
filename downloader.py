@@ -256,6 +256,25 @@ def find_local_executable(candidates: Iterable[str]) -> Optional[str]:
     return None
 
 
+def _windows_short_path(path: str) -> str:
+    if not sys.platform == "win32":
+        return os.path.abspath(path)
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(
+            os.path.abspath(path),
+            buffer,
+            len(buffer),
+        )
+        if length:
+            return os.path.abspath(buffer.value)
+    except Exception:
+        pass
+    return os.path.abspath(path)
+
+
 def _ffmpeg_built_tool(name: str) -> Optional[str]:
     executable_name = f"{name}.exe" if sys.platform == "win32" else name
     path = os.path.join(FFMPEG_OUTPUT_BIN_DIR, executable_name)
@@ -1406,8 +1425,9 @@ def _windows_ffmpeg_build_workspace(log) -> Optional[str]:
     candidate = os.path.abspath(os.path.join(FFMPEG_OUTPUT_DIR, "workspace"))
     try:
         os.makedirs(candidate, exist_ok=True)
-        log(f"Using FFmpeg build workspace inside the binaries folder: {candidate}")
-        return candidate
+        short_candidate = _windows_short_path(candidate)
+        log(f"Using FFmpeg build workspace inside the binaries folder: {short_candidate}")
+        return short_candidate
     except OSError as exc:
         log(f"ERROR: Could not create the in-folder FFmpeg build workspace: {exc}")
         return None
@@ -1524,8 +1544,9 @@ def _prepare_windows_amf_headers(workspace: str, log) -> Optional[str]:
     if not os.path.isfile(staged_header):
         log("WARNING: Staged AMD AMF Version.h is missing; AMF will not be forced.")
         return None
-    log(f"Staged current AMD AMF headers in no-space FFmpeg workspace: {staged_include}")
-    return staged_include
+    short_staged_include = _windows_short_path(staged_include)
+    log(f"Staged current AMD AMF headers in no-space FFmpeg workspace: {short_staged_include}")
+    return short_staged_include
 
 
 def _copy_msys_runtime_dependencies(staged_bin: str, toolchain_bin: Optional[str], log) -> None:
@@ -1726,7 +1747,6 @@ if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vpl; then
 else
     echo "WARNING: Intel oneVPL/libvpl was not found."
 fi
-EXTRA_FLAGS+=(--enable-d3d11va --enable-dxva2)
 
 if ! command -v nasm >/dev/null 2>&1; then
     echo "NASM was not found; compiling with --disable-x86asm so the first build can still complete."
@@ -1819,7 +1839,7 @@ if ! command -v nmake.exe >/dev/null 2>&1; then
     exit 93
 fi
 
-EXTRA_FLAGS=(--enable-d3d11va --enable-dxva2 --enable-libmp3lame)
+EXTRA_FLAGS=(--enable-libmp3lame)
 EXTRA_CFLAGS=("-I./__LAME_INCLUDE__")
 EXTRA_LDFLAGS=("/LIBPATH:./__LAME_LIB__")
 AMF_INCLUDE_WINDOWS="${DOWNLOADER_AMF_INCLUDE_WINDOWS:-}"
