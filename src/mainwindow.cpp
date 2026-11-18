@@ -298,7 +298,7 @@ void MainWindow::setBusy(bool busy) {
     const bool downloadBusy = downloadWorker_ && downloadWorker_->isRunning();
     const bool active = busy || toolBusy || downloadBusy;
     startButton_->setEnabled(!active && toolsReady_);
-    cancelButton_->setEnabled(busy || downloadBusy || toolBusy);
+    cancelButton_->setEnabled(active);
     mode_->setEnabled(!active);
     container_->setEnabled(!active);
     videoCodec_->setEnabled(!active && mode_->currentData().toString() == QStringLiteral("video"));
@@ -309,10 +309,7 @@ void MainWindow::setBusy(bool busy) {
 }
 
 void MainWindow::updateReadyState() {
-    const bool toolBusy = toolWorker_ && toolWorker_->isRunning();
-    const bool downloadBusy = downloadWorker_ && downloadWorker_->isRunning();
-    startButton_->setEnabled(toolsReady_ && !toolBusy && !downloadBusy);
-    settingsButton_->setEnabled(!toolBusy && !downloadBusy);
+    setBusy(false);
 }
 
 void MainWindow::startToolTask(ToolWorker::Task task) {

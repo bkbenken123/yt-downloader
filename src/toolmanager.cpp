@@ -189,7 +189,8 @@ bool ToolManager::prepare(const Log &log, const std::atomic_bool *cancel) {
     if (!sourcePresent) {
         QString diagnostic;
         const ToolPaths bundled = locate(&diagnostic);
-        if (!bundled.ffmpeg.isEmpty() && !bundled.ffprobe.isEmpty() && !bundled.ytdlpCommand.isEmpty() &&
+        if (!bundled.ffmpeg.isEmpty() && !bundled.ffprobe.isEmpty() &&
+            !bundled.ytdlpCommand.isEmpty() && !bundled.ytdlpVersion.isEmpty() &&
             verifyFFmpeg(bundled.ffmpeg, bundled.ffprobe, log)) {
             log(QStringLiteral("Using FFmpeg, FFprobe, and yt-dlp bundled beside the application."));
             if (!bundled.ytdlpVersion.isEmpty())

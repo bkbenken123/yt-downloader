@@ -56,11 +56,27 @@ if (!$SkipToolBuild) {
     New-Item -ItemType Directory -Force -Path $FfmpegWork | Out-Null
     Copy-Item (Join-Path $FfmpegSource "*") $FfmpegWork -Recurse -Force
 
+    $AmfRoot = Join-Path $ProjectRoot "binaries\dependencies\AMF"
+    $AmfInclude = Join-Path $AmfRoot "amf\public\include"
+    if (!(Test-Path (Join-Path $AmfInclude "core\Version.h"))) {
+        Remove-Item $AmfRoot -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path (Split-Path $AmfRoot -Parent) | Out-Null
+        Invoke-Native -File "git" -Arguments @("clone", "--depth", "1", "https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git", $AmfRoot)
+    }
+    $StagedAmf = Join-Path $FfmpegWork "_downloader_deps\amf\AMF"
+    New-Item -ItemType Directory -Force -Path (Split-Path $StagedAmf -Parent) | Out-Null
+    Copy-Item $AmfInclude $StagedAmf -Recurse -Force
+
     $Script = @'
 set -e
 cd /c/DownloaderFFmpegBundleBuild
 PREFIX="$PWD/_bundle"
 FLAGS=(--enable-gpl --enable-version3 --enable-shared --disable-static --disable-doc --disable-ffplay --enable-d3d11va --enable-dxva2)
+EXTRA_CFLAGS=("-O3")
+if [ -d "$PWD/_downloader_deps/amf/AMF" ]; then
+    FLAGS+=(--enable-amf)
+    EXTRA_CFLAGS+=("-I$PWD/_downloader_deps/amf")
+fi
 pkg-config --exists lame && FLAGS+=(--enable-libmp3lame) || { echo "libmp3lame required" >&2; exit 42; }
 pkg-config --exists opus && FLAGS+=(--enable-libopus)
 pkg-config --exists x264 && FLAGS+=(--enable-libx264)
@@ -70,7 +86,7 @@ pkg-config --exists aom && FLAGS+=(--enable-libaom)
 pkg-config --exists ffnvcodec && FLAGS+=(--enable-ffnvcodec --enable-nvenc --enable-nvdec)
 pkg-config --exists vpl && FLAGS+=(--enable-libvpl)
 command -v nasm >/dev/null 2>&1 || FLAGS+=(--disable-x86asm)
-./configure --prefix="$PREFIX" --extra-cflags="-O3" "${FLAGS[@]}"
+./configure --prefix="$PREFIX" --extra-cflags="${EXTRA_CFLAGS[*]}" "${FLAGS[@]}"
 make -j"$NUMBER_OF_PROCESSORS"
 make install
 '@
@@ -78,12 +94,22 @@ make install
     & $Bash -lc "bash /c/DownloaderFFmpegBundleBuild/.bundle-build.sh"
     if ($LASTEXITCODE -ne 0) { throw "FFmpeg compilation failed" }
 
-    $FfmpegBin = Join-Path $ProjectRoot "binaries\ffmpeg-build\bin"
-    Remove-Item $FfmpegBin -Recurse -Force -ErrorAction SilentlyContinue
+    $FfmpegBuildDir = Join-Path $ProjectRoot "binaries\ffmpeg-build"
+    $FfmpegBin = Join-Path $FfmpegBuildDir "bin"
+    Remove-Item $FfmpegBuildDir -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $FfmpegBin | Out-Null
     Copy-Item (Join-Path $FfmpegWork "_bundle\bin\*") $FfmpegBin -Recurse -Force
+    if (Test-Path (Join-Path $FfmpegWork "ffbuild\config.log")) {
+        Copy-Item (Join-Path $FfmpegWork "ffbuild\config.log") (Join-Path $FfmpegBuildDir "configure.log") -Force
+    }
+    '{"profile":"all-vendors-win-linux-v5-required-codecs","platform":"win32"}' | Set-Content -Path (Join-Path $FfmpegBuildDir ".downloader-build-profile.json") -NoNewline
 
-    $YtdlpDist = Join-Path $BuildRoot "yt-dlp"
+}
+
+$YtdlpDist = Join-Path $BuildRoot "yt-dlp"
+$YtdlpExe = Join-Path $YtdlpDist "yt-dlp.exe"
+if (!$SkipToolBuild -or !(Test-Path $YtdlpExe)) {
+    if (!(Test-Path (Join-Path $YtdlpSource "yt_dlp\__main__.py"))) { throw "yt-dlp source checkout is missing" }
     Remove-Item $YtdlpDist -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $YtdlpDist | Out-Null
     Invoke-Native -File "py" -Arguments @(
@@ -95,9 +121,33 @@ make install
 }
 
 $FfmpegBin = Join-Path $ProjectRoot "binaries\ffmpeg-build\bin"
-$Bash = Join-Path $MsysRoot "usr\bin\bash.exe"
-if ((Test-Path (Join-Path $FfmpegBin "ffmpeg.exe")) -and (Test-Path $Bash)) {
-    Copy-Item (Join-Path $MsysRoot "ucrt64\bin\*.dll") $FfmpegBin -Force
+$Objdump = Join-Path $MsysRoot "ucrt64\bin\objdump.exe"
+if ((Test-Path (Join-Path $FfmpegBin "ffmpeg.exe")) -and (Test-Path $Objdump)) {
+    $System32 = Join-Path $env:SystemRoot "System32"
+    $Inspected = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $Queue = New-Object 'System.Collections.Generic.Queue[string]'
+    Get-ChildItem -Path $FfmpegBin -File | Where-Object { $_.Extension -in '.exe', '.dll' } | ForEach-Object { $Queue.Enqueue($_.FullName) }
+    while ($Queue.Count -gt 0) {
+        $Current = $Queue.Dequeue()
+        $Leaf = [System.IO.Path]::GetFileName($Current)
+        if (-not $Inspected.Add($Leaf)) { continue }
+        $Output = & $Objdump -p $Current 2>$null
+        foreach ($Line in $Output) {
+            if ($Line -match 'DLL Name:\s*([^\s]+)') {
+                $Dll = $Matches[1]
+                if ($Inspected.Contains($Dll)) { continue }
+                if ($Dll -like 'api-ms-win-*' -or $Dll -like 'ext-ms-*') { continue }
+                if (Test-Path (Join-Path $System32 $Dll)) { continue }
+                $Dest = Join-Path $FfmpegBin $Dll
+                if (Test-Path $Dest) { $Queue.Enqueue($Dest); continue }
+                $Src = @( (Join-Path $MsysRoot "ucrt64\bin\$Dll"), (Join-Path $MsysRoot "usr\bin\$Dll") ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+                if ($Src) {
+                    Copy-Item $Src $Dest -Force
+                    $Queue.Enqueue($Dest)
+                }
+            }
+        }
+    }
 }
 
 if (!$SkipAppBuild) {
@@ -130,7 +180,7 @@ $PyInstallerArgs = @(
     "--specpath",$LauncherSpec,
     "--add-data",(Join-Path $BuildRoot "app;downloader"),
     "--add-data",($FfmpegBin + ";binaries/ffmpeg-build/bin"),
-    "--add-binary",(Join-Path $YtdlpExe ";binaries/yt-dlp/yt-dlp.exe"),
+    "--add-binary",(Join-Path $YtdlpExe ";binaries/yt-dlp"),
     (Join-Path $ProjectRoot "src\launcher.py")
 )
 Invoke-Native -File "py" -Arguments $PyInstallerArgs -WorkingDirectory $ProjectRoot
