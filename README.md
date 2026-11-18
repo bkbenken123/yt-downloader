@@ -33,14 +33,9 @@ The application searches the dedicated build directory first, then the bundled b
 
 - FFmpeg and FFprobe: binaries/ffmpeg-build/bin/ or PATH.
 - yt-dlp: binaries/yt-dlp/, binaries/yt-dlp_linux on Linux, a packaged executable, or a system installation.
-- Standalone yt-dlp executable: binaries/yt-dlp.exe or PATH.
 
 The application invokes yt-dlp as an external tool. No downloader GUI, worker, settings, media pipeline, or application logic is implemented in Python.
 
 ## Settings
 
 config.json is written beside the application source root (the directory containing binaries/) and is updated atomically only when settings change. The defaults are CPU encoding, playlist downloads enabled, yt-dlp audio conversion enabled, and metadata/thumbnail/chapter embedding disabled.
-
-## Validation
-
-The GitHub Actions workflow builds the Qt application on Windows and Linux and runs the CTest smoke test. It validates compilation and application startup/help handling; real downloads and GPU encoders still depend on the user's network, installed codecs, drivers, and hardware.
