@@ -1386,6 +1386,15 @@ def _prepare_git_dependency(path: str, url: str, required_relpath: str, label: s
     return code == 0 and _git_checkout_ready(path, required_relpath)
 
 
+def _pull_git_subtree(git: str, prefix: str, url: str, branch: str = "master") -> tuple[bool, str]:
+    code, output = _run_update_command(
+        [git, "subtree", "pull", "--prefix=" + prefix, url, branch, "--squash"],
+        timeout=900,
+        cwd=APP_SOURCE_DIR,
+    )
+    return code == 0, output
+
+
 def _msys2_package_prefix(msystem: Optional[str]) -> Optional[str]:
     return {
         "UCRT64": "mingw-w64-ucrt-x86_64",
@@ -2393,82 +2402,26 @@ def update_ffmpeg_source_checkout(log) -> tuple[bool, bool, str]:
     is_git_checkout = git_probe_code == 0 and git_probe_output.strip().lower().endswith("true")
     if not is_git_checkout:
         log(
-            "FFmpeg source folder is a plain source tree without Git metadata. "
-            "Converting it to a proper FFmpeg Git checkout..."
+            "FFmpeg source folder is an embedded Git subtree. "
+            "Pulling subtree updates..."
         )
-        parent_dir = os.path.dirname(FFMPEG_SOURCE_DIR)
-        staged_dir = os.path.join(parent_dir, "ffmpeg.git-new")
-        backup_dir = os.path.join(parent_dir, "ffmpeg.snapshot-backup")
-        try:
-            for stale in (staged_dir, backup_dir):
-                if os.path.isdir(stale):
-                    shutil.rmtree(stale)
-                elif os.path.exists(stale):
-                    os.remove(stale)
-        except OSError as exc:
-            message = f"Could not clear a stale FFmpeg update staging folder: {exc}"
-            log(f"ERROR: {message}")
-            return False, False, message
-        cloned = False
-        last_output = ""
         for repo_url in FFMPEG_GIT_URLS:
-            log(f"Cloning FFmpeg Git source from: {repo_url}")
-            clone_code, clone_output = _run_update_command(
-                [git, "-c", "core.autocrlf=false", "clone", "--depth", "1", repo_url, staged_dir],
-                timeout=900, cwd=parent_dir,
+            pulled, output = _pull_git_subtree(
+                git,
+                os.path.relpath(FFMPEG_SOURCE_DIR, APP_SOURCE_DIR),
+                repo_url,
             )
-            last_output = clone_output
-            if clone_output:
-                for line in clone_output.splitlines():
+            if output:
+                for line in output.splitlines():
                     if line.strip():
-                        log(f"[ffmpeg-git] {line}")
-            if clone_code == 0 and os.path.isfile(os.path.join(staged_dir, "configure")):
-                cloned = True
-                break
-            try:
-                if os.path.isdir(staged_dir):
-                    shutil.rmtree(staged_dir)
-                elif os.path.exists(staged_dir):
-                    os.remove(staged_dir)
-            except OSError:
-                pass
-        if not cloned:
-            message = "Could not clone the FFmpeg Git repository. The existing source tree and compiled FFmpeg were left unchanged."
-            log(f"ERROR: {message}")
-            if last_output:
-                log(last_output.splitlines()[-1])
-            return False, False, message
-        revision_code, revision_output = _run_update_command(
-            [git, "rev-parse", "HEAD"], timeout=30, cwd=staged_dir,
-        )
-        new_revision = (
-            revision_output.strip().splitlines()[-1]
-            if revision_code == 0 and revision_output.strip() else "unknown"
-        )
-        try:
-            os.replace(FFMPEG_SOURCE_DIR, backup_dir)
-            try:
-                os.replace(staged_dir, FFMPEG_SOURCE_DIR)
-            except Exception:
-                os.replace(backup_dir, FFMPEG_SOURCE_DIR)
-                raise
-        except Exception as exc:
-            try:
-                if os.path.isdir(staged_dir):
-                    shutil.rmtree(staged_dir)
-            except OSError:
-                pass
-            message = f"Could not replace the legacy FFmpeg source tree with the Git checkout: {exc}"
-            log(f"ERROR: {message}")
-            return False, False, message
-        try:
-            shutil.rmtree(backup_dir)
-        except OSError as exc:
-            log(f"WARNING: The old FFmpeg source snapshot could not be removed: {backup_dir} ({exc})")
-        log(f"FFmpeg source is now a real Git checkout at revision: {new_revision[:12]}")
-        message = "FFmpeg source tree was converted to the latest Git checkout. Rebuilding the compiled FFmpeg output now."
-        log(message)
-        return True, True, message
+                        log(f"[ffmpeg-subtree] {line}")
+            if pulled:
+                message = "FFmpeg Git subtree was updated. Rebuilding the compiled FFmpeg output now."
+                log(message)
+                return True, True, message
+        message = "Could not pull the FFmpeg Git subtree. The existing source tree and compiled FFmpeg were left unchanged."
+        log(f"ERROR: {message}")
+        return False, False, message
     before_code, before_output = _run_update_command(
         [git, "rev-parse", "HEAD"], timeout=30, cwd=FFMPEG_SOURCE_DIR,
     )
@@ -2610,51 +2563,20 @@ def update_ytdlp_installation() -> tuple[bool, list[str]]:
             messages.append("WARNING: Git was not found on PATH, so yt-dlp could not be updated.")
         else:
             messages.append("Checking yt-dlp for updates...")
-            temp_root = tempfile.mkdtemp(prefix="yt-dlp-update-", dir=tempfile.gettempdir())
-            staged_dir = os.path.join(temp_root, "source")
-            backup_dir = os.path.join(temp_root, "current")
-            try:
-                code, output = _run_update_command(
-                    [git, "clone", "--depth", "1", YTDLP_GIT_URL, staged_dir],
-                    timeout=900,
+            if _app_git_checkout(git):
+                pulled, output = _pull_git_subtree(
+                    git,
+                    os.path.relpath(YTDLP_SOURCE_DIR, APP_SOURCE_DIR),
+                    YTDLP_GIT_URL,
                 )
                 if output:
                     messages.extend(line for line in output.splitlines() if line.strip())
-                staged_package = os.path.join(staged_dir, "yt_dlp")
-                if code != 0 or not os.path.isfile(os.path.join(staged_package, "__main__.py")):
-                    messages.append("WARNING: Could not download the latest yt-dlp runtime; using the existing checkout.")
+                if pulled:
+                    messages.append("yt-dlp Git subtree pull completed.")
                 else:
-                    new_version_code, new_version = _run_update_command(
-                        [sys.executable, os.path.join(staged_package, "__main__.py"), "--version"],
-                        timeout=30,
-                    )
-                    current_version_code, current_version = _run_update_command(
-                        [sys.executable, source_main, "--version"], timeout=30,
-                    )
-                    new_version = new_version.strip().splitlines()[-1] if new_version.strip() else "unknown"
-                    current_version = current_version.strip().splitlines()[-1] if current_version.strip() else "unknown"
-                    if new_version_code == 0 and current_version_code == 0 and new_version == current_version:
-                        messages.append(f"yt-dlp is already up to date at {current_version}.")
-                    else:
-                        replacement = os.path.join(temp_root, "yt_dlp")
-                        shutil.copytree(staged_package, replacement)
-                        current_package = os.path.join(YTDLP_SOURCE_DIR, "yt_dlp")
-                        os.replace(current_package, backup_dir)
-                        try:
-                            os.replace(replacement, current_package)
-                        except Exception:
-                            os.replace(backup_dir, current_package)
-                            raise
-                        shutil.rmtree(backup_dir, ignore_errors=True)
-                        messages.append(f"yt-dlp runtime updated: {current_version} -> {new_version}.")
-            except (OSError, shutil.Error) as exc:
-                messages.append(f"WARNING: Could not update yt-dlp runtime: {exc}")
-            finally:
-                shutil.rmtree(temp_root, ignore_errors=True)
-        try:
-            _prune_ytdlp_checkout()
-        except OSError as exc:
-            messages.append(f"WARNING: Could not prune yt-dlp checkout: {exc}")
+                    messages.append("WARNING: Could not pull the yt-dlp Git subtree; using the existing checkout.")
+            else:
+                messages.append("WARNING: The application is not a Git checkout, so the yt-dlp Git subtree cannot be pulled.")
         verify_code, version_output = _run_update_command(
             [sys.executable, source_main, "--version"], timeout=30,
         )
