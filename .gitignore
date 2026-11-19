@@ -1,4 +1,13 @@
 /binaries/
+.qt/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+build.ninja
+cmake_install.cmake
+.ninja_deps
+.ninja_log
+downloader_autogen/
 config.json
 downloader.exe
 __pycache__/
