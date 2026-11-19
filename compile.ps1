@@ -21,6 +21,31 @@ function Invoke-Native {
     } finally { Pop-Location }
 }
 
+function Ensure-GitSource {
+    param(
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Marker,
+        [Parameter(Mandatory)][string[]]$Urls
+    )
+    if (Test-Path (Join-Path $Destination $Marker)) { return }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path $Destination -Parent) | Out-Null
+    if (Test-Path $Destination) {
+        Remove-Item $Destination -Recurse -Force
+    }
+    $Git = Get-Command git -ErrorAction SilentlyContinue
+    if (!$Git) { throw "git is required to clone build sources" }
+    foreach ($Url in $Urls) {
+        Write-Host "Cloning $Url..."
+        & $Git.Source clone --depth 1 $Url $Destination
+        if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $Destination $Marker))) { return }
+        if (Test-Path $Destination) {
+            Remove-Item $Destination -Recurse -Force
+        }
+    }
+    throw "Could not clone source checkout into $Destination"
+}
+
 Write-Host "Checking build dependencies..."
 py -3 -m pip install --upgrade pip cmake pyinstaller --quiet
 $Cmake = py -3 -c "import cmake,sys,os; print(os.path.join(os.path.dirname(cmake.__file__),'data','bin','cmake.exe'))"
@@ -33,8 +58,13 @@ $VsDevCmd = Join-Path $VsPath "Common7\Tools\VsDevCmd.bat"
 if (!(Test-Path $VsDevCmd)) { throw "Visual Studio developer environment was not found" }
 
 if (!$SkipToolBuild) {
-    if (!(Test-Path (Join-Path $FfmpegSource "configure"))) { throw "FFmpeg source checkout is missing" }
-    if (!(Test-Path (Join-Path $YtdlpSource "yt_dlp\__main__.py"))) { throw "yt-dlp source checkout is missing" }
+    Ensure-GitSource -Destination $FfmpegSource -Marker "configure" -Urls @(
+        "https://git.ffmpeg.org/ffmpeg.git",
+        "https://github.com/FFmpeg/FFmpeg.git"
+    )
+    Ensure-GitSource -Destination $YtdlpSource -Marker "yt_dlp\__main__.py" -Urls @(
+        "https://github.com/yt-dlp/yt-dlp.git"
+    )
 
     $Bash = Join-Path $MsysRoot "usr\bin\bash.exe"
     if (!(Test-Path $Bash)) { throw "MSYS2 bash.exe was not found at $Bash" }

@@ -35,6 +35,7 @@ bool ToolManager::copyDirectory(const QString &source, const QString &destinatio
 
 bool ToolManager::updateYtdlp(const Log &log, bool *changed, const std::atomic_bool *cancel) {
     if (changed) *changed = false;
+    QDir().mkpath(binariesDirectory());
     const QString source = ytdlpSourceDirectory();
     const QString entry = QDir(source).filePath(QStringLiteral("yt_dlp/__main__.py"));
     const QString git = gitPath();
@@ -94,6 +95,7 @@ bool ToolManager::updateYtdlp(const Log &log, bool *changed, const std::atomic_b
 
 bool ToolManager::updateFFmpegSource(const Log &log, bool *changed, const std::atomic_bool *cancel) {
     if (changed) *changed = false;
+    QDir().mkpath(binariesDirectory());
     const QString source = ffmpegSourceDirectory();
     const QString git = gitPath();
     if (git.isEmpty()) {
@@ -101,8 +103,29 @@ bool ToolManager::updateFFmpegSource(const Log &log, bool *changed, const std::a
         return false;
     }
     if (!QFileInfo(QDir(source).filePath(QStringLiteral("configure"))).isFile()) {
-        log(QStringLiteral("ERROR: FFmpeg source checkout was not found at %1").arg(source));
-        return false;
+        log(QStringLiteral("FFmpeg source is missing; cloning a Git checkout..."));
+        const QString staging = QDir(binariesDirectory()).filePath(QStringLiteral("ffmpeg.git-new"));
+        QDir(staging).removeRecursively();
+        ProcessResult clone = gitRun(git, {QStringLiteral("-c"), QStringLiteral("core.autocrlf=false"),
+            QStringLiteral("clone"), QStringLiteral("--depth"), QStringLiteral("1"),
+            QStringLiteral("https://git.ffmpeg.org/ffmpeg.git"), staging},
+            binariesDirectory(), 1800000, log, cancel);
+        if (clone.exitCode != 0) {
+            QDir(staging).removeRecursively();
+            clone = gitRun(git, {QStringLiteral("clone"), QStringLiteral("--depth"), QStringLiteral("1"),
+                QStringLiteral("https://github.com/FFmpeg/FFmpeg.git"), staging},
+                binariesDirectory(), 1800000, log, cancel);
+        }
+        if (clone.exitCode != 0 || !QFileInfo(QDir(staging).filePath(QStringLiteral("configure"))).isFile()) {
+            QDir(staging).removeRecursively();
+            log(QStringLiteral("ERROR: FFmpeg clone failed."));
+            return false;
+        }
+        if (QFileInfo::exists(source) && !QDir(source).removeRecursively()) return false;
+        if (!QDir().rename(staging, source)) return false;
+        if (changed) *changed = true;
+        log(QStringLiteral("FFmpeg source checkout cloned."));
+        return true;
     }
     if (!isGitCheckout(source)) {
         log(QStringLiteral("FFmpeg source is a plain tree; cloning a Git checkout before replacement..."));

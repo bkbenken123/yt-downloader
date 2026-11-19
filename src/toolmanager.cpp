@@ -23,6 +23,9 @@ QString ToolManager::appDirectory() {
     for (int depth = 0; depth < 8; ++depth) {
         if (QDir(directory.filePath(QStringLiteral("binaries"))).exists())
             return directory.absolutePath();
+        if (QFileInfo(directory.filePath(QStringLiteral("CMakeLists.txt"))).isFile() &&
+            QDir(directory.filePath(QStringLiteral("src"))).exists())
+            return directory.absolutePath();
         if (!directory.cdUp()) break;
     }
     return QCoreApplication::applicationDirPath();

@@ -27,6 +27,9 @@ struct AppConfig {
         for (int depth = 0; depth < 6; ++depth) {
             if (QDir(directory.filePath(QStringLiteral("binaries"))).exists())
                 return directory.filePath(QStringLiteral("config.json"));
+            if (QFileInfo(directory.filePath(QStringLiteral("CMakeLists.txt"))).isFile() &&
+                QDir(directory.filePath(QStringLiteral("src"))).exists())
+                return directory.filePath(QStringLiteral("config.json"));
             if (!directory.cdUp()) break;
         }
         return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("config.json"));

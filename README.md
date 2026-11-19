@@ -12,6 +12,8 @@
 - Atomic config.json settings, startup dependency checks, and an explicit Tools & App update action.
 - FFmpeg runtime/build separation. Compiled FFmpeg runtime files are installed in binaries/ffmpeg-build/bin/; source checkouts are not part of the repository.
 
+The build script clones missing FFmpeg and yt-dlp source checkouts automatically into `binaries/`. The entire `binaries/` directory is ignored by Git, as are generated build outputs.
+
 ## Build
 
 Required: CMake 3.24 or newer, a C++20 compiler, and Qt 6.6 or newer with Core, Gui, Widgets, and Network modules.
