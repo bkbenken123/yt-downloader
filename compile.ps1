@@ -198,23 +198,18 @@ if (!(Test-Path (Join-Path $FfmpegBin "ffmpeg.exe"))) { throw "Compiled ffmpeg.e
 if (!(Test-Path (Join-Path $FfmpegBin "ffprobe.exe"))) { throw "Compiled ffprobe.exe was not found" }
 if (!(Test-Path $YtdlpExe)) { throw "Compiled yt-dlp.exe was not found" }
 
-$LauncherSpec = Join-Path $BuildRoot "launcher"
-Remove-Item $LauncherSpec -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $LauncherSpec | Out-Null
+Copy-Item (Join-Path $BuildRoot "app\*") $ProjectRoot -Recurse -Force
 
-$PyInstallerArgs = @(
-    "-3","-m","PyInstaller","--noconfirm","--clean","--onefile","--noconsole",
-    "--name","downloader",
-    "--distpath",$ProjectRoot,
-    "--workpath",(Join-Path $BuildRoot "launcher-work"),
-    "--specpath",$LauncherSpec,
-    "--add-data",(Join-Path $BuildRoot "app;downloader"),
-    "--add-data",($FfmpegBin + ";binaries/ffmpeg-build/bin"),
-    "--add-binary",(Join-Path $YtdlpExe ";binaries/yt-dlp"),
-    (Join-Path $ProjectRoot "src\launcher.py")
-)
-Invoke-Native -File "py" -Arguments $PyInstallerArgs -WorkingDirectory $ProjectRoot
+$FfmpegDestination = Join-Path $ProjectRoot "binaries\ffmpeg-build\bin"
+New-Item -ItemType Directory -Force -Path $FfmpegDestination | Out-Null
+if ([System.IO.Path]::GetFullPath($FfmpegBin).TrimEnd('\') -ne [System.IO.Path]::GetFullPath($FfmpegDestination).TrimEnd('\')) {
+    Copy-Item (Join-Path $FfmpegBin "*") $FfmpegDestination -Recurse -Force
+}
+
+$YtdlpDestination = Join-Path $ProjectRoot "binaries\yt-dlp"
+New-Item -ItemType Directory -Force -Path $YtdlpDestination | Out-Null
+Copy-Item $YtdlpExe $YtdlpDestination -Force
 
 $FinalExe = Join-Path $ProjectRoot "downloader.exe"
-if (!(Test-Path $FinalExe)) { throw "Final one-file executable was not created" }
-Write-Host "Built self-contained executable: $FinalExe"
+if (!(Test-Path $FinalExe)) { throw "Final C++ executable was not created" }
+Write-Host "Built native C++ executable: $FinalExe"
