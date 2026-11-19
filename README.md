@@ -12,7 +12,7 @@
 - Atomic config.json settings, startup dependency checks, and an explicit Tools & App update action.
 - FFmpeg runtime/build separation. Compiled FFmpeg runtime files are installed in binaries/ffmpeg-build/bin/; source checkouts are not part of the repository.
 
-The build script clones missing FFmpeg and yt-dlp source checkouts automatically into `binaries/`. The entire `binaries/` directory is ignored by Git, as are generated build outputs.
+The build script clones missing FFmpeg and yt-dlp source checkouts automatically into `binaries/`. yt-dlp is compiled from that source with PyInstaller; the application does not download or self-update a yt-dlp binary. The entire `binaries/` directory is ignored by Git, as are generated build outputs.
 
 ## Build
 
@@ -30,7 +30,7 @@ The FFmpeg builder enables optional hardware/codec features for which developmen
 The application searches the dedicated build directory first, then the bundled binaries/ directory and PATH.
 
 - FFmpeg and FFprobe: binaries/ffmpeg-build/bin/ or PATH.
-- yt-dlp: binaries/yt-dlp/, binaries/yt-dlp_linux on Linux, a packaged executable, or a system installation.
+- yt-dlp: binaries/yt-dlp/yt-dlp.exe or binaries/yt-dlp_linux on Linux, followed only by a source/Python fallback for development.
 
 The application invokes yt-dlp as an external tool. No downloader GUI, worker, settings, media pipeline, or application logic is implemented in Python.
 

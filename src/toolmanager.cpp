@@ -79,6 +79,13 @@ ToolPaths ToolManager::locate(QString *diagnostic) {
     if (QFileInfo(linuxBinary).isFile() && QFileInfo(linuxBinary).isExecutable())
         paths.ytdlpCommand << linuxBinary;
 #endif
+    if (paths.ytdlpCommand.isEmpty()) {
+        const QString executable = ProcessRunner::findExecutable(
+            {ProcessRunner::platformExecutableName(QStringLiteral("yt-dlp")), QStringLiteral("yt-dlp"),
+             QStringLiteral("yt_dlp.exe"), QStringLiteral("yt_dlp")},
+            {ytdlpSourceDirectory(), binariesDirectory()});
+        if (!executable.isEmpty()) paths.ytdlpCommand << executable;
+    }
     const QString sourceMain = QDir(ytdlpSourceDirectory()).filePath(QStringLiteral("yt_dlp/__main__.py"));
     if (paths.ytdlpCommand.isEmpty() && QFileInfo(sourceMain).isFile()) {
         QStringList prefix;

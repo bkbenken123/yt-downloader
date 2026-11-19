@@ -16,6 +16,7 @@ struct UpdateSummary {
     bool success = true;
     bool changed = false;
     bool ffmpegRebuilt = false;
+    bool rebundleScheduled = false;
     QStringList messages;
 };
 
@@ -37,6 +38,7 @@ public:
 private:
     static QString pythonProgram(QStringList *prefixArguments = nullptr);
     static bool updateYtdlp(const Log &log, bool *changed, const std::atomic_bool *cancel);
+    static bool buildYtdlp(const Log &log, const std::atomic_bool *cancel);
     static bool updateFFmpegSource(const Log &log, bool *changed, const std::atomic_bool *cancel);
     static bool updateApplication(const Log &log, bool *changed, const std::atomic_bool *cancel);
     static bool ensureFFmpeg(const Log &log, const std::atomic_bool *cancel);
@@ -47,4 +49,5 @@ private:
     static bool verifyFFmpeg(const QString &ffmpeg, const QString &ffprobe, const Log &log);
     static bool copyDirectory(const QString &source, const QString &destination,
                               const QStringList &excludedNames = {});
+    static bool rebundleApplication(const Log &log);
 };

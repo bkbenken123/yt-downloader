@@ -148,6 +148,11 @@ if (!$SkipToolBuild -or !(Test-Path $YtdlpExe)) {
         "--workpath",(Join-Path $BuildRoot "yt-dlp-work"),
         "--specpath",$BuildRoot,(Join-Path $YtdlpSource "yt_dlp\__main__.py")
     ) -WorkingDirectory $YtdlpSource
+} elseif ($SkipToolBuild) {
+    $SourceYtdlpExe = Join-Path $YtdlpSource "yt-dlp.exe"
+    if (!(Test-Path $SourceYtdlpExe)) { throw "Compiled yt-dlp.exe was not found in binaries\yt-dlp" }
+    New-Item -ItemType Directory -Force -Path $YtdlpDist | Out-Null
+    Copy-Item $SourceYtdlpExe $YtdlpExe -Force
 }
 
 $FfmpegBin = Join-Path $ProjectRoot "binaries\ffmpeg-build\bin"

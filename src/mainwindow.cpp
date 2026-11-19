@@ -24,6 +24,7 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QUrl>
 #include <QWidget>
@@ -113,8 +114,8 @@ public:
         form->addRow(QStringLiteral("Metadata"), metadata_);
         root->addLayout(form);
 
-        auto *update = new QPushButton(QStringLiteral("Check / Update Tools and Application"), this);
-        update->setToolTip(QStringLiteral("Update FFmpeg source/build, yt-dlp, and the current application branch."));
+        auto *update = new QPushButton(QStringLiteral("Update, Rebundle, and Restart"), this);
+        update->setToolTip(QStringLiteral("Update FFmpeg and yt-dlp from source, rebuild them, rebundle the app, and restart."));
         root->addWidget(update);
         connect(update, &QPushButton::clicked, this, [this] {
             if (updateCallback_) updateCallback_();
@@ -326,10 +327,12 @@ void MainWindow::startToolTask(ToolWorker::Task task) {
                 statusLabel_->setText(success ? QStringLiteral("Ready") : QStringLiteral("Tool setup failed"));
             } else {
                 if (restartRequired)
-                    appendLog(QStringLiteral("The application source changed. Rebuild the C++ target and restart to load the updated app."));
+                    appendLog(QStringLiteral("Tools updated. Rebundling and restarting the application."));
                 statusLabel_->setText(success ? QStringLiteral("Update check complete") : QStringLiteral("Update failed"));
             }
             updateReadyState();
+            if (task == ToolWorker::Task::Update && success && restartRequired)
+                QTimer::singleShot(750, this, [this] { close(); });
         });
     connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     connect(worker, &QThread::finished, this, [this, worker] {
